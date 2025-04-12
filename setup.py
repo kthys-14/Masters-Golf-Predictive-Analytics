@@ -15,7 +15,9 @@ def check_dependencies():
         "requests",
         "pillow",
         "pickle-mixin",
-        "data-golf"
+        "data-golf",
+        "folium",
+        "streamlit-folium"
     ]
     
     missing_packages = []

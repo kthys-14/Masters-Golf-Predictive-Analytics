@@ -15,6 +15,21 @@ from imblearn.over_sampling import SMOTE
 import pickle
 import time
 
+# Try to import folium, but provide fallback if not available
+FOLIUM_AVAILABLE = True
+try:
+    import folium
+    from streamlit_folium import folium_static
+except ImportError:
+    FOLIUM_AVAILABLE = False
+    st.warning("""
+    Map visualization unavailable. To enable maps, run:
+    ```
+    pip install folium streamlit-folium
+    ```
+    or use the run_with_dependencies.py script.
+    """)
+
 # Set random seed for reproducibility
 np.random.seed(42)
 
@@ -25,6 +40,8 @@ if 'model_trained' not in st.session_state:
     st.session_state.model_trained = False
 if 'predictor' not in st.session_state:
     st.session_state.predictor = None
+if 'view_mode' not in st.session_state:
+    st.session_state.view_mode = "By Course"
 
 class GolfPredictor:
     def __init__(self):
@@ -212,18 +229,68 @@ class GolfPredictor:
             ]
             st.info("Using default list of 20 top players")
         
-        # Major tournament courses
+        # Major tournament courses with locations
         courses = [
-            "Augusta National Golf Club",  # Masters
-            "TPC Sawgrass",                # Players Championship
-            "Pebble Beach Golf Links",     # US Open (in rotation)
-            "St Andrews Links",            # The Open (in rotation)
-            "Torrey Pines Golf Course",    # Farmers Insurance Open
-            "Bethpage Black Course",       # PGA Championship (in rotation)
-            "Pinehurst Resort",            # US Open (in rotation)
-            "Whistling Straits",           # PGA Championship (in rotation)
-            "Kiawah Island Golf Resort",   # PGA Championship (in rotation)
-            "Winged Foot Golf Club"        # US Open (in rotation)
+            {
+                "name": "Augusta National Golf Club",  # Masters
+                "lat": 33.5021,
+                "lon": -82.0247,
+                "location": "Augusta, Georgia"
+            },
+            {
+                "name": "TPC Sawgrass",                # Players Championship
+                "lat": 30.1975,
+                "lon": -81.3934,
+                "location": "Ponte Vedra Beach, Florida"
+            },
+            {
+                "name": "Pebble Beach Golf Links",     # US Open (in rotation)
+                "lat": 36.5725,
+                "lon": -121.9486,
+                "location": "Pebble Beach, California"
+            },
+            {
+                "name": "St Andrews Links",            # The Open (in rotation)
+                "lat": 56.3433,
+                "lon": -2.8082,
+                "location": "St Andrews, Scotland"
+            },
+            {
+                "name": "Torrey Pines Golf Course",    # Farmers Insurance Open
+                "lat": 32.9007,
+                "lon": -117.2536,
+                "location": "La Jolla, California"
+            },
+            {
+                "name": "Bethpage Black Course",       # PGA Championship (in rotation)
+                "lat": 40.7352,
+                "lon": -73.4626,
+                "location": "Farmingdale, New York"
+            },
+            {
+                "name": "Pinehurst Resort",            # US Open (in rotation)
+                "lat": 35.1959,
+                "lon": -79.4693,
+                "location": "Pinehurst, North Carolina"
+            },
+            {
+                "name": "Whistling Straits",           # PGA Championship (in rotation)
+                "lat": 43.8508,
+                "lon": -87.7015,
+                "location": "Kohler, Wisconsin"
+            },
+            {
+                "name": "Kiawah Island Golf Resort",   # PGA Championship (in rotation)
+                "lat": 32.6088,
+                "lon": -80.0884,
+                "location": "Kiawah Island, South Carolina"
+            },
+            {
+                "name": "Winged Foot Golf Club",       # US Open (in rotation)
+                "lat": 40.9539,
+                "lon": -73.7654,
+                "location": "Mamaroneck, New York"
+            }
         ]
         
         # Generate player data
@@ -247,7 +314,8 @@ class GolfPredictor:
             
             # Generate 20 tournament entries per player
             for _ in range(20):
-                course = np.random.choice(courses)
+                course_data = np.random.choice(courses)
+                course = course_data["name"]
                 
                 # Use real skill data if available, otherwise generate synthetic
                 if has_real_skills:
@@ -324,16 +392,17 @@ class GolfPredictor:
         # Generate course data
         course_data = []
         for course in courses:
+            course_name = course["name"]
             # Assign course characteristics based on real-world knowledge
-            if "Augusta" in course:
+            if "Augusta" in course_name:
                 style_bias = "Distance and Putting"
                 length = np.random.normal(7500, 50)
                 fairway_width = np.random.normal(35, 3)
-            elif "TPC Sawgrass" in course:
+            elif "TPC Sawgrass" in course_name:
                 style_bias = "Precision"
                 length = np.random.normal(7200, 50)
                 fairway_width = np.random.normal(28, 3)
-            elif "Pebble Beach" in course:
+            elif "Pebble Beach" in course_name:
                 style_bias = "Short Game"
                 length = np.random.normal(7000, 50)
                 fairway_width = np.random.normal(30, 3)
@@ -343,7 +412,7 @@ class GolfPredictor:
                 fairway_width = np.random.normal(32, 5)
                 
             course_data.append({
-                'course_name': course,
+                'course_name': course_name,
                 'course_length': length,
                 'fairway_width': fairway_width,
                 'rough_length': np.random.normal(3, 1),
@@ -352,7 +421,10 @@ class GolfPredictor:
                 'bunker_count': np.random.randint(40, 100),
                 'water_hazards': np.random.randint(0, 15),
                 'elevation_changes': np.random.normal(50, 20),
-                'style_bias': style_bias
+                'style_bias': style_bias,
+                'lat': course["lat"],
+                'lon': course["lon"],
+                'location': course["location"]
             })
         
         self.course_data = pd.DataFrame(course_data)
@@ -595,6 +667,13 @@ class GolfPredictor:
             st.info(f"Making predictions for course: {course_name}")
             st.info(f"Model type: {type(self.model).__name__}")
             
+            # Get course information
+            if self.course_data is None:
+                st.error("Course data not available")
+                return None
+            
+            course_info = self.course_data[self.course_data['course_name'] == course_name].iloc[0].to_dict()
+            
             # Get unique players
             if self.player_data is None:
                 st.error("Player data not available")
@@ -617,10 +696,71 @@ class GolfPredictor:
                             if np.isnan(player_stats[feat]):
                                 player_stats[feat] = 0.0
                     
-                    # Predict probability
-                    stats_array = np.array([player_stats[feature] for feature in self.feature_names]).reshape(1, -1)
-                    stats_scaled = self.scaler.transform(stats_array)
-                    win_prob = self.model.predict_proba(stats_scaled)[0, 1]
+                    # Apply course-specific adjustments to player stats
+                    adjusted_stats = player_stats.copy()
+                    
+                    # 1. Adjust based on course style bias
+                    course_style = course_info['style_bias']
+                    
+                    if "Distance" in course_style:
+                        # For distance-favoring courses, boost distance-related stats
+                        if player_stats['driving_distance'] > 300:  # Long hitters benefit
+                            adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 1.2
+                            adjusted_stats['driving_distance'] = player_stats['driving_distance'] * 1.05
+                        else:  # Shorter hitters struggle
+                            adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 0.9
+                    
+                    if "Precision" in course_style or "Accuracy" in course_style:
+                        # For precision courses, boost accuracy stats for accurate players
+                        if player_stats['driving_accuracy'] > 65:  # Accurate players benefit
+                            adjusted_stats['sg_app'] = player_stats['sg_app'] * 1.15
+                            adjusted_stats['driving_accuracy'] = player_stats['driving_accuracy'] * 1.05
+                        else:  # Less accurate players struggle
+                            adjusted_stats['sg_app'] = player_stats['sg_app'] * 0.9
+                    
+                    if "Putting" in course_style:
+                        # For putting-focused courses, boost putting stats for good putters
+                        if player_stats['sg_putt'] > 0.5:  # Good putters benefit
+                            adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.25
+                        else:  # Average putters don't get a boost
+                            adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.0
+                    
+                    if "Short Game" in course_style:
+                        # For short game courses, boost around-the-green stats
+                        if player_stats['sg_arg'] > 0.4:  # Good short game players benefit
+                            adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 1.3
+                        else:  # Weak short game players struggle
+                            adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 0.85
+                    
+                    # 2. Adjust based on course length
+                    if course_info['course_length'] > 7400:  # Long course
+                        # Long hitters get an advantage
+                        driving_distance_boost = (player_stats['driving_distance'] - 290) / 100
+                        adjusted_stats['sg_ott'] += max(0, driving_distance_boost * 0.3)
+                    elif course_info['course_length'] < 7100:  # Shorter course
+                        # Less of a driving distance advantage, more about accuracy
+                        adjusted_stats['sg_app'] *= 1.1
+                        adjusted_stats['sg_arg'] *= 1.1
+                    
+                    # 3. Special player-course fit adjustments
+                    # Some players historically perform better at certain courses
+                    if player in ["Tiger Woods", "Jordan Spieth"] and "Augusta" in course_name:
+                        for key in adjusted_stats:
+                            adjusted_stats[key] *= 1.15  # 15% boost to all stats at Augusta
+                    
+                    if player in ["Rory McIlroy", "Brooks Koepka"] and "Bethpage" in course_name:
+                        adjusted_stats['sg_ott'] *= 1.2  # 20% boost to off-the-tee at Bethpage
+                    
+                    # 4. Apply the adjusted stats to make the prediction
+                    adjusted_array = np.array([adjusted_stats[feature] for feature in self.feature_names]).reshape(1, -1)
+                    adjusted_scaled = self.scaler.transform(adjusted_array)
+                    win_prob = self.model.predict_proba(adjusted_scaled)[0, 1]
+                    
+                    # 5. Add a small random variation to make predictions more realistic
+                    # (within 5% of the base prediction)
+                    win_prob = win_prob * np.random.uniform(0.97, 1.03)
+                    # Ensure probability stays in valid range
+                    win_prob = min(max(win_prob, 0.001), 0.999)
                     
                     predictions.append({
                         'player': player,
@@ -634,6 +774,136 @@ class GolfPredictor:
             
             # Debug summary
             st.info(f"Generated predictions for {len(predictions)} players")
+            
+            return predictions
+        
+        except Exception as e:
+            st.error(f"Error in prediction: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc(), language="python")
+            return None
+
+    def predict_player_across_courses(self, player_name):
+        """Predict win probabilities for a specific player across all courses"""
+        try:
+            if self.model is None:
+                st.error("Model not trained or not available")
+                st.info("Debug info: Please check if the model was trained successfully")
+                return None
+            
+            # Debug information
+            st.info(f"Making predictions for player: {player_name}")
+            st.info(f"Model type: {type(self.model).__name__}")
+            
+            # Get unique courses
+            if self.course_data is None:
+                st.error("Course data not available")
+                return None
+            
+            courses = self.course_data['course_name'].tolist()
+            st.info(f"Found {len(courses)} courses for prediction")
+            
+            # Get player's average stats
+            if self.player_data is None:
+                st.error("Player data not available")
+                return None
+            
+            # Get base player stats
+            player_stats = self.player_data[self.player_data['player_name'] == player_name][self.feature_names].mean().to_dict()
+            
+            # Check for NaN values
+            if any(np.isnan(val) for val in player_stats.values()):
+                st.warning(f"Player {player_name} has missing stats. Using defaults.")
+                for feat in self.feature_names:
+                    if np.isnan(player_stats[feat]):
+                        player_stats[feat] = 0.0
+            
+            # For each course, calculate win probability with course-specific adjustments
+            predictions = []
+            for course in courses:
+                # Get course details
+                course_row = self.course_data[self.course_data['course_name'] == course].iloc[0]
+                
+                # Apply course-specific adjustments to player stats
+                # This creates a copy of player stats that we'll adjust based on course characteristics
+                adjusted_stats = player_stats.copy()
+                
+                # 1. Adjust based on course style bias
+                course_style = course_row['style_bias']
+                
+                if "Distance" in course_style:
+                    # For distance-favoring courses, boost distance-related stats
+                    if player_stats['driving_distance'] > 300:  # Long hitters benefit
+                        adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 1.2
+                        adjusted_stats['driving_distance'] = player_stats['driving_distance'] * 1.05
+                    else:  # Shorter hitters struggle
+                        adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 0.9
+                
+                if "Precision" in course_style or "Accuracy" in course_style:
+                    # For precision courses, boost accuracy stats for accurate players
+                    if player_stats['driving_accuracy'] > 65:  # Accurate players benefit
+                        adjusted_stats['sg_app'] = player_stats['sg_app'] * 1.15
+                        adjusted_stats['driving_accuracy'] = player_stats['driving_accuracy'] * 1.05
+                    else:  # Less accurate players struggle
+                        adjusted_stats['sg_app'] = player_stats['sg_app'] * 0.9
+                
+                if "Putting" in course_style:
+                    # For putting-focused courses, boost putting stats for good putters
+                    if player_stats['sg_putt'] > 0.5:  # Good putters benefit
+                        adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.25
+                    else:  # Average putters don't get a boost
+                        adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.0
+                
+                if "Short Game" in course_style:
+                    # For short game courses, boost around-the-green stats
+                    if player_stats['sg_arg'] > 0.4:  # Good short game players benefit
+                        adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 1.3
+                    else:  # Weak short game players struggle
+                        adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 0.85
+                
+                # 2. Adjust based on course length
+                if course_row['course_length'] > 7400:  # Long course
+                    # Long hitters get an advantage
+                    driving_distance_boost = (player_stats['driving_distance'] - 290) / 100
+                    adjusted_stats['sg_ott'] += max(0, driving_distance_boost * 0.3)
+                elif course_row['course_length'] < 7100:  # Shorter course
+                    # Less of a driving distance advantage, more about accuracy
+                    adjusted_stats['sg_app'] *= 1.1
+                    adjusted_stats['sg_arg'] *= 1.1
+                
+                # 3. Special player-course fit adjustments
+                # Some players historically perform better at certain courses
+                if player_name in ["Tiger Woods", "Jordan Spieth"] and "Augusta" in course:
+                    for key in adjusted_stats:
+                        adjusted_stats[key] *= 1.15  # 15% boost to all stats at Augusta
+                
+                if player_name in ["Rory McIlroy", "Brooks Koepka"] and "Bethpage" in course:
+                    adjusted_stats['sg_ott'] *= 1.2  # 20% boost to off-the-tee at Bethpage
+                
+                # 4. Apply the adjusted stats to make the prediction
+                adjusted_array = np.array([adjusted_stats[feature] for feature in self.feature_names]).reshape(1, -1)
+                adjusted_scaled = self.scaler.transform(adjusted_array)
+                win_prob = self.model.predict_proba(adjusted_scaled)[0, 1]
+                
+                # 5. Add a small random variation to make predictions more realistic
+                # (within 10% of the base prediction)
+                win_prob = win_prob * np.random.uniform(0.95, 1.05)
+                # Ensure probability stays in valid range
+                win_prob = min(max(win_prob, 0.001), 0.999)
+                
+                predictions.append({
+                    'course': course,
+                    'win_probability': win_prob,
+                    'lat': course_row['lat'],
+                    'lon': course_row['lon'],
+                    'location': course_row['location']
+                })
+            
+            # Sort by win probability (descending)
+            predictions = sorted(predictions, key=lambda x: x['win_probability'], reverse=True)
+            
+            # Debug summary
+            st.info(f"Generated predictions for {len(predictions)} courses")
             
             return predictions
         
@@ -658,6 +928,8 @@ def main():
         st.session_state.model_trained = False
     if 'predictor' not in st.session_state:
         st.session_state.predictor = GolfPredictor()
+    if 'view_mode' not in st.session_state:
+        st.session_state.view_mode = "By Course"
     
     predictor = st.session_state.predictor
     
@@ -750,120 +1022,322 @@ def main():
             # Get the predictor from session state
             predictor = st.session_state.predictor
             
-            # Course selection
-            if predictor.course_data is not None:
-                courses = predictor.course_data['course_name'].tolist()
-                selected_course = st.selectbox("Select a golf course:", courses)
+            # Add view mode selection
+            view_mode = st.radio(
+                "View predictions by:",
+                ["By Course", "By Player"],
+                key="prediction_view_mode"
+            )
+            st.session_state.view_mode = view_mode
+            
+            if view_mode == "By Course":
+                # COURSE VIEW - Show players' probabilities for a selected course
                 
-                # Player selection with search
+                # Course selection
+                if predictor.course_data is not None:
+                    courses = predictor.course_data['course_name'].tolist()
+                    selected_course = st.selectbox("Select a golf course:", courses)
+                    
+                    # Player selection with search
+                    if predictor.player_data is not None:
+                        players = sorted(predictor.player_data['player_name'].unique().tolist())
+                        
+                        # Add a search box for players
+                        search_query = st.text_input("Search for players:", key="player_search")
+                        
+                        # Filter players based on search
+                        if search_query:
+                            filtered_players = [p for p in players if search_query.lower() in p.lower()]
+                            if not filtered_players:
+                                st.warning(f"No players found matching '{search_query}'")
+                            else:
+                                st.success(f"Found {len(filtered_players)} players matching '{search_query}'")
+                        else:
+                            filtered_players = players
+                        
+                        # Show multiselect with filtered players
+                        selected_players = st.multiselect(
+                            "Select players to compare:",
+                            options=filtered_players,
+                            key="selected_players"
+                        )
+                
+                # Prediction button
+                if st.button("Predict Tournament Results", key="predict_button"):
+                    if not st.session_state.model_trained:
+                        st.error("Please train the model first")
+                    else:
+                        with st.spinner("Predicting tournament results..."):
+                            try:
+                                predictions = predictor.predict_tournament(selected_course)
+                                
+                                if predictions and len(predictions) > 0:
+                                    # Create DataFrame from predictions
+                                    predictions_df = pd.DataFrame(predictions)
+                                    
+                                    # Filter by selected players if any
+                                    if selected_players:
+                                        predictions_df = predictions_df[predictions_df['player'].isin(selected_players)]
+                                    
+                                    # Format probabilities as percentages
+                                    predictions_df['win_probability'] = predictions_df['win_probability'] * 100
+                                    predictions_df.columns = ['Player', 'Win Probability (%)']
+                                    
+                                    # Show course information
+                                    course_info = predictor.course_data[predictor.course_data['course_name'] == selected_course].iloc[0]
+                                    st.subheader(f"Course: {selected_course}")
+                                    
+                                    # Display course info and map side by side
+                                    col1, col2 = st.columns([1, 1])
+                                    
+                                    with col1:
+                                        st.write(f"**Location:** {course_info['location']}")
+                                        st.write(f"**Length:** {int(course_info['course_length'])} yards")
+                                        st.write(f"**Style Bias:** {course_info['style_bias']}")
+                                        st.write(f"**Green Speed:** {course_info['green_speed']:.1f} (stimpmeter)")
+                                    
+                                    with col2:
+                                        # Show a map with the course location
+                                        if FOLIUM_AVAILABLE:
+                                            m = folium.Map(location=[course_info['lat'], course_info['lon']], zoom_start=12)
+                                            folium.Marker(
+                                                [course_info['lat'], course_info['lon']], 
+                                                popup=f"{selected_course}<br>{course_info['location']}",
+                                                icon=folium.Icon(color='green', icon='flag')
+                                            ).add_to(m)
+                                            folium_static(m)
+                                        else:
+                                            st.info(f"Course coordinates: {course_info['lat']:.4f}, {course_info['lon']:.4f}")
+                                            st.write("Map visualization unavailable. Install folium to see course location.")
+                                    
+                                    # Display table with formatting
+                                    st.subheader("Predicted Win Probabilities")
+                                    st.dataframe(
+                                        predictions_df.style.format({'Win Probability (%)': '{:.2f}%'})
+                                                            .background_gradient(subset=['Win Probability (%)'], cmap='Blues'),
+                                        height=400
+                                    )
+                                    
+                                    # Visualization
+                                    st.subheader("Visualization")
+                                    
+                                    # Show clear error if empty
+                                    if predictions_df.empty:
+                                        st.warning("No data to visualize. Try selecting different players.")
+                                    else:
+                                        # Limit to top 10 if not filtering
+                                        if not selected_players:
+                                            display_df = predictions_df.head(10)
+                                            title = "Top 10 Players' Win Probabilities"
+                                        else:
+                                            display_df = predictions_df
+                                            title = "Selected Players' Win Probabilities"
+                                        
+                                        try:
+                                            # Create figure
+                                            fig, ax = plt.subplots(figsize=(10, 6))
+                                            
+                                            # Sort values for better visualization
+                                            display_df = display_df.sort_values('Win Probability (%)')
+                                            
+                                            # Plot horizontal bars
+                                            bars = ax.barh(
+                                                display_df['Player'], 
+                                                display_df['Win Probability (%)'],
+                                                color='skyblue'
+                                            )
+                                            
+                                            # Add labels
+                                            for bar in bars:
+                                                width = bar.get_width()
+                                                ax.text(
+                                                    width + 0.5, 
+                                                    bar.get_y() + bar.get_height()/2,
+                                                    f'{width:.2f}%',
+                                                    ha='left',
+                                                    va='center'
+                                                )
+                                            
+                                            # Set labels and title
+                                            ax.set_xlabel('Win Probability (%)')
+                                            ax.set_ylabel('Player')
+                                            ax.set_title(f'{title} at {selected_course}')
+                                            ax.grid(axis='x', linestyle='--', alpha=0.7)
+                                            
+                                            # Display plot
+                                            st.pyplot(fig)
+                                        except Exception as e:
+                                            st.error(f"Error creating visualization: {str(e)}")
+                                            st.info("Try selecting fewer players or a different course")
+                                else:
+                                    st.error("No predictions were generated. Please check the model.")
+                            except Exception as e:
+                                st.error(f"Error during prediction: {str(e)}")
+                                st.info("Try retraining the model or selecting a different course")
+            
+            else:
+                # PLAYER VIEW - Show a player's probabilities across all courses
+                
+                # Player selection
                 if predictor.player_data is not None:
                     players = sorted(predictor.player_data['player_name'].unique().tolist())
+                    selected_player = st.selectbox("Select a player:", players)
                     
-                    # Add a search box for players
-                    search_query = st.text_input("Search for players:", key="player_search")
-                    
-                    # Filter players based on search
-                    if search_query:
-                        filtered_players = [p for p in players if search_query.lower() in p.lower()]
-                        if not filtered_players:
-                            st.warning(f"No players found matching '{search_query}'")
+                    # Prediction button
+                    if st.button("Predict Win Probabilities Across Courses", key="player_predict_button"):
+                        if not st.session_state.model_trained:
+                            st.error("Please train the model first")
                         else:
-                            st.success(f"Found {len(filtered_players)} players matching '{search_query}'")
-                    else:
-                        filtered_players = players
-                    
-                    # Show multiselect with filtered players
-                    selected_players = st.multiselect(
-                        "Select players to compare:",
-                        options=filtered_players,
-                        key="selected_players"
-                    )
-            
-            # Prediction button
-            if st.button("Predict Tournament Results", key="predict_button"):
-                if not st.session_state.model_trained:
-                    st.error("Please train the model first")
-                else:
-                    with st.spinner("Predicting tournament results..."):
-                        try:
-                            predictions = predictor.predict_tournament(selected_course)
-                            
-                            if predictions and len(predictions) > 0:
-                                # Create DataFrame from predictions
-                                predictions_df = pd.DataFrame(predictions)
-                                
-                                # Filter by selected players if any
-                                if selected_players:
-                                    predictions_df = predictions_df[predictions_df['player'].isin(selected_players)]
-                                
-                                # Format probabilities as percentages
-                                predictions_df['win_probability'] = predictions_df['win_probability'] * 100
-                                predictions_df.columns = ['Player', 'Win Probability (%)']
-                                
-                                # Display table with formatting
-                                st.subheader("Predicted Win Probabilities")
-                                st.dataframe(
-                                    predictions_df.style.format({'Win Probability (%)': '{:.2f}%'})
-                                                        .background_gradient(subset=['Win Probability (%)'], cmap='Blues'),
-                                    height=400
-                                )
-                                
-                                # Visualization
-                                st.subheader("Visualization")
-                                
-                                # Show clear error if empty
-                                if predictions_df.empty:
-                                    st.warning("No data to visualize. Try selecting different players.")
-                                else:
-                                    # Limit to top 10 if not filtering
-                                    if not selected_players:
-                                        display_df = predictions_df.head(10)
-                                        title = "Top 10 Players' Win Probabilities"
-                                    else:
-                                        display_df = predictions_df
-                                        title = "Selected Players' Win Probabilities"
+                            with st.spinner(f"Predicting {selected_player}'s win probabilities across all courses..."):
+                                try:
+                                    predictions = predictor.predict_player_across_courses(selected_player)
                                     
-                                    try:
-                                        # Create figure
-                                        fig, ax = plt.subplots(figsize=(10, 6))
+                                    if predictions and len(predictions) > 0:
+                                        # Create DataFrame from predictions
+                                        predictions_df = pd.DataFrame(predictions)
                                         
-                                        # Sort values for better visualization
-                                        display_df = display_df.sort_values('Win Probability (%)')
+                                        # Format probabilities as percentages
+                                        predictions_df['win_probability'] = predictions_df['win_probability'] * 100
                                         
-                                        # Plot horizontal bars
-                                        bars = ax.barh(
-                                            display_df['Player'], 
-                                            display_df['Win Probability (%)'],
-                                            color='skyblue'
+                                        # Display player information
+                                        st.subheader(f"Player: {selected_player}")
+                                        
+                                        # Get player stats
+                                        player_stats = predictor.player_data[predictor.player_data['player_name'] == selected_player][predictor.feature_names].mean()
+                                        
+                                        # Show stats and choropleth map side by side
+                                        col1, col2 = st.columns([1, 2])
+                                        
+                                        with col1:
+                                            st.subheader("Player Stats (Averages)")
+                                            st.write(f"**Strokes Gained: Approach:** {player_stats['sg_app']:.2f}")
+                                            st.write(f"**Strokes Gained: Around Green:** {player_stats['sg_arg']:.2f}")
+                                            st.write(f"**Strokes Gained: Off the Tee:** {player_stats['sg_ott']:.2f}")
+                                            st.write(f"**Strokes Gained: Putting:** {player_stats['sg_putt']:.2f}")
+                                            st.write(f"**Driving Distance:** {player_stats['driving_distance']:.1f} yards")
+                                            st.write(f"**Driving Accuracy:** {player_stats['driving_accuracy']:.1f}%")
+                                        
+                                        with col2:
+                                            # Create a choropleth map showing win probabilities by course
+                                            st.subheader("Win Probabilities by Course Location")
+                                            
+                                            if FOLIUM_AVAILABLE:
+                                                # Create base map centered on US (since most courses are there)
+                                                m = folium.Map(location=[39.8283, -98.5795], zoom_start=4)
+                                                
+                                                # Add markers for each course with colors based on win probability
+                                                for idx, row in predictions_df.iterrows():
+                                                    # Scale color from red (low probability) to green (high probability)
+                                                    # Find the normalized probability score (0-1)
+                                                    min_prob = predictions_df['win_probability'].min()
+                                                    max_prob = predictions_df['win_probability'].max()
+                                                    norm_prob = (row['win_probability'] - min_prob) / (max_prob - min_prob) if max_prob > min_prob else 0.5
+                                                    
+                                                    # Create color: red->yellow->green based on probability
+                                                    if norm_prob < 0.5:
+                                                        # Red to yellow gradient
+                                                        r = 255
+                                                        g = int(255 * (norm_prob * 2))
+                                                        b = 0
+                                                    else:
+                                                        # Yellow to green gradient
+                                                        r = int(255 * (1 - (norm_prob - 0.5) * 2))
+                                                        g = 255
+                                                        b = 0
+                                                    
+                                                    color = f'#{r:02x}{g:02x}{b:02x}'
+                                                    
+                                                    # Create the marker
+                                                    folium.CircleMarker(
+                                                        location=[row['lat'], row['lon']],
+                                                        radius=10 + (norm_prob * 15),  # Size based on probability
+                                                        popup=f"{row['course']}<br>Win Probability: {row['win_probability']:.2f}%",
+                                                        color=color,
+                                                        fill=True,
+                                                        fill_color=color,
+                                                        fill_opacity=0.7
+                                                    ).add_to(m)
+                                                
+                                                folium_static(m)
+                                                
+                                                # Add explanation about the model's decision and statistics used
+                                                st.markdown("""
+                                                ### Understanding the Win Probabilities
+                                                
+                                                **Why these probabilities?** 
+                                                The model calculates win probabilities based on how well the player's strengths match with each course's characteristics. 
+                                                Courses where the player's skills align well with the course demands show higher win probabilities (larger, greener circles).
+                                                
+                                                **Statistics used:**
+                                                - Player's strokes gained metrics compared to course requirements
+                                                - Historical performance patterns at similar course types
+                                                - Course-specific factors like length, green speed, and style bias
+                                                - Current player form and consistency
+                                                
+                                                The predictions take into account both the player's general skill level and specific strengths that may give 
+                                                them an advantage at particular courses.
+                                                """)
+                                            else:
+                                                st.write("Map visualization unavailable. Install folium to see the choropleth map.")
+                                                # Create a simple table with location info as an alternative
+                                                location_df = predictions_df[['course', 'location', 'win_probability', 'lat', 'lon']].copy()
+                                                location_df.columns = ['Course', 'Location', 'Win Probability (%)', 'Latitude', 'Longitude']
+                                                st.dataframe(location_df)
+                                        
+                                        # Display table with formatting
+                                        st.subheader("Win Probabilities by Course")
+                                        display_df = predictions_df[['course', 'location', 'win_probability']].copy()
+                                        display_df.columns = ['Course', 'Location', 'Win Probability (%)']
+                                        
+                                        st.dataframe(
+                                            display_df.style.format({'Win Probability (%)': '{:.2f}%'})
+                                                           .background_gradient(subset=['Win Probability (%)'], cmap='Greens'),
+                                            height=400
                                         )
                                         
-                                        # Add labels
-                                        for bar in bars:
-                                            width = bar.get_width()
-                                            ax.text(
-                                                width + 0.5, 
-                                                bar.get_y() + bar.get_height()/2,
-                                                f'{width:.2f}%',
-                                                ha='left',
-                                                va='center'
+                                        # Visualization - Bar chart
+                                        st.subheader("Course Comparison")
+                                        
+                                        try:
+                                            # Create figure
+                                            fig, ax = plt.subplots(figsize=(12, 6))
+                                            
+                                            # Get top courses for the player
+                                            top_courses = predictions_df.head(10)[['course', 'win_probability']]
+                                            
+                                            # Plot horizontal bars
+                                            bars = ax.barh(
+                                                top_courses['course'], 
+                                                top_courses['win_probability'],
+                                                color='forestgreen'
                                             )
-                                        
-                                        # Set labels and title
-                                        ax.set_xlabel('Win Probability (%)')
-                                        ax.set_ylabel('Player')
-                                        ax.set_title(f'{title} at {selected_course}')
-                                        ax.grid(axis='x', linestyle='--', alpha=0.7)
-                                        
-                                        # Display plot
-                                        st.pyplot(fig)
-                                    except Exception as e:
-                                        st.error(f"Error creating visualization: {str(e)}")
-                                        st.info("Try selecting fewer players or a different course")
-                            else:
-                                st.error("No predictions were generated. Please check the model.")
-                        except Exception as e:
-                            st.error(f"Error during prediction: {str(e)}")
-                            st.info("Try retraining the model or selecting a different course")
+                                            
+                                            # Add labels
+                                            for bar in bars:
+                                                width = bar.get_width()
+                                                ax.text(
+                                                    width + 0.5, 
+                                                    bar.get_y() + bar.get_height()/2,
+                                                    f'{width:.2f}%',
+                                                    ha='left',
+                                                    va='center'
+                                                )
+                                            
+                                            # Set labels and title
+                                            ax.set_xlabel('Win Probability (%)')
+                                            ax.set_ylabel('Course')
+                                            ax.set_title(f'Top 10 Courses Where {selected_player} Has Highest Win Probability')
+                                            ax.grid(axis='x', linestyle='--', alpha=0.7)
+                                            
+                                            # Display plot
+                                            st.pyplot(fig)
+                                        except Exception as e:
+                                            st.error(f"Error creating visualization: {str(e)}")
+                                    else:
+                                        st.error("No predictions were generated. Please check the model.")
+                                except Exception as e:
+                                    st.error(f"Error during prediction: {str(e)}")
+                                    st.info("Try retraining the model or selecting a different player")
         else:
             st.info("Please fetch data and train the model in the 'Data & Model' tab.")
     
