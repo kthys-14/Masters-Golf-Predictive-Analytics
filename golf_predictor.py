@@ -7,13 +7,14 @@ import streamlit as st
 import requests
 import json
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, r2_score
 from imblearn.over_sampling import SMOTE
 import pickle
 import time
+from datetime import datetime, date
 
 # Try to import folium, but provide fallback if not available
 FOLIUM_AVAILABLE = True
@@ -42,6 +43,10 @@ if 'predictor' not in st.session_state:
     st.session_state.predictor = None
 if 'view_mode' not in st.session_state:
     st.session_state.view_mode = "By Course"
+if 'model_metrics' not in st.session_state:
+    st.session_state.model_metrics = {}
+if 'confusion_matrices' not in st.session_state:
+    st.session_state.confusion_matrices = {}
 
 class GolfPredictor:
     def __init__(self):
@@ -63,10 +68,23 @@ class GolfPredictor:
         
         try:
             try:
+                # First try to import our custom historical DataGolf client
+                try:
+                    from datagolf_client import create_client, extend_datagolf_client
+                    st.success("Found custom DataGolf client with historical data support")
+                    use_custom_client = True
+                except ImportError:
+                    use_custom_client = False
+                    st.info("Custom DataGolf client not found, using standard client")
+                
                 from data_golf import DataGolfClient
                 
                 # Initialize the client with your API key
-                client = DataGolfClient(api_key=self.api_key, verbose=True)  # Enable verbose for debugging
+                if use_custom_client:
+                    client = create_client(api_key=self.api_key, verbose=True)
+                    st.success("Using enhanced DataGolf client with historical data support")
+                else:
+                    client = DataGolfClient(api_key=self.api_key, verbose=True)  # Enable verbose for debugging
                 
                 # Test connection with player list
                 st.info("Testing connection to DataGolf API...")
@@ -86,9 +104,22 @@ class GolfPredictor:
                 except Exception as e:
                     st.warning(f"API connection test failed: {str(e)}")
                     raise Exception("API connection test failed")
-                    
-                # Build dataset from multiple endpoints
                 
+                # If we have the custom client with historical data support, use it
+                if use_custom_client and hasattr(client, 'historical'):
+                    st.info("Fetching historical round data from 2020-2024...")
+                    try:
+                        historical_data = self.fetch_historical_data(client)
+                        if historical_data is not None and not historical_data.empty:
+                            st.success(f"Successfully loaded {len(historical_data)} historical round records!")
+                            return self.process_historical_data(historical_data, client)
+                        else:
+                            st.warning("No historical data found. Falling back to standard API data.")
+                    except Exception as e:
+                        st.error(f"Error fetching historical data: {str(e)}")
+                        st.info("Falling back to standard API data...")
+                
+                # Build dataset from multiple endpoints
                 # 1. Fetch player rankings
                 st.info("Fetching player rankings...")
                 rankings_data = client.predictions.rankings()
@@ -157,6 +188,262 @@ class GolfPredictor:
             
             return True
         
+    def fetch_historical_data(self, client):
+        """Fetch historical round data from 2020-2024 using the enhanced DataGolf client"""
+        try:
+            # Get multi-year data for PGA tour from 2020-2024
+            historical_df = client.historical.fetch_multi_year_data(
+                start_year=2020,
+                end_year=2024,
+                tour='pga',
+                event_id='all'
+            )
+            
+            if historical_df.empty:
+                st.warning("Received empty historical data response")
+                return None
+                
+            # Log some basic statistics about the data
+            st.info(f"Retrieved {len(historical_df)} historical rounds from {historical_df['event_name'].nunique()} events")
+            st.info(f"Data includes {historical_df['player_name'].nunique()} unique players")
+            
+            return historical_df
+            
+        except Exception as e:
+            st.error(f"Error fetching historical data: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc(), language="python")
+            return None
+            
+    def process_historical_data(self, historical_df, client):
+        """Process historical DataGolf data into our required format"""
+        st.info("Processing historical data...")
+        
+        try:
+            # First, let's get the main player data from historical rounds
+            player_data = []
+            
+            # Get a list of unique players and courses
+            unique_players = historical_df['player_name'].unique()
+            unique_events = historical_df['event_name'].unique()
+            
+            st.success(f"Processing data for {len(unique_players)} players across {len(unique_events)} tournaments")
+            
+            # If we need to filter to specific courses, we could do that here
+            # For now, we'll use all courses in the data
+            
+            # Show the feature columns we have available
+            st.info(f"Available data columns: {', '.join(historical_df.columns)}")
+            
+            # Map courses to our predefined locations if available
+            # Major tournament courses with locations
+            courses = [
+                {
+                    "name": "Augusta National Golf Club",  # Masters
+                    "lat": 33.5021,
+                    "lon": -82.0247,
+                    "location": "Augusta, Georgia"
+                },
+                {
+                    "name": "TPC Sawgrass",                # Players Championship
+                    "lat": 30.1975,
+                    "lon": -81.3934,
+                    "location": "Ponte Vedra Beach, Florida"
+                },
+                {
+                    "name": "Pebble Beach Golf Links",     # US Open (in rotation)
+                    "lat": 36.5725,
+                    "lon": -121.9486,
+                    "location": "Pebble Beach, California"
+                },
+                {
+                    "name": "St Andrews Links",            # The Open (in rotation)
+                    "lat": 56.3433,
+                    "lon": -2.8082,
+                    "location": "St Andrews, Scotland"
+                },
+                {
+                    "name": "Torrey Pines Golf Course",    # Farmers Insurance Open
+                    "lat": 32.9007,
+                    "lon": -117.2536,
+                    "location": "La Jolla, California"
+                },
+                {
+                    "name": "Bethpage Black Course",       # PGA Championship (in rotation)
+                    "lat": 40.7352,
+                    "lon": -73.4626,
+                    "location": "Farmingdale, New York"
+                },
+                {
+                    "name": "Pinehurst Resort",            # US Open (in rotation)
+                    "lat": 35.1959,
+                    "lon": -79.4693,
+                    "location": "Pinehurst, North Carolina"
+                },
+                {
+                    "name": "Whistling Straits",           # PGA Championship (in rotation)
+                    "lat": 43.8508,
+                    "lon": -87.7015,
+                    "location": "Kohler, Wisconsin"
+                },
+                {
+                    "name": "Kiawah Island Golf Resort",   # PGA Championship (in rotation)
+                    "lat": 32.6088,
+                    "lon": -80.0884,
+                    "location": "Kiawah Island, South Carolina"
+                },
+                {
+                    "name": "Winged Foot Golf Club",       # US Open (in rotation)
+                    "lat": 40.9539,
+                    "lon": -73.7654,
+                    "location": "Mamaroneck, New York"
+                }
+            ]
+            
+            # Map historical event names to our known courses if possible
+            course_mapping = {}
+            course_lookup = {course["name"].lower(): course for course in courses}
+            
+            # Map events to courses based on name matching
+            for event_name in unique_events:
+                # Try to match event name to course name
+                course_found = False
+                for course_name, course_info in course_lookup.items():
+                    # Check for partial match in either direction
+                    if course_name in event_name.lower() or any(word in course_name for word in event_name.lower().split()):
+                        course_mapping[event_name] = course_info
+                        course_found = True
+                        break
+                
+                # If no match found, create a placeholder course
+                if not course_found:
+                    # Use random coordinates in the US for unmapped courses
+                    import random
+                    lat = random.uniform(25, 49)  # US latitude range
+                    lon = random.uniform(-125, -65)  # US longitude range
+                    
+                    course_mapping[event_name] = {
+                        "name": event_name,
+                        "lat": lat, 
+                        "lon": lon,
+                        "location": "United States"
+                    }
+            
+            # Extract relevant player performance metrics from historical data
+            for _, row in historical_df.iterrows():
+                player_name = row['player_name']
+                event_name = row['event_name']
+                
+                # Skip rows with missing key data
+                if pd.isna(row.get('round_score', None)) or pd.isna(row.get('sg_total', None)):
+                    continue
+                
+                # Map event to course
+                course_info = course_mapping.get(event_name, {"name": event_name})
+                course_name = course_info["name"]
+                
+                # Check if player won the tournament
+                # We don't have a 'win' column in the historical data, so we'll use finish_position
+                # A player winning would typically have a finish_position of '1' or 'T1'
+                finish_pos = str(row.get('finish_position', '')).strip()
+                win = 1 if finish_pos in ['1', 'T1', '1st', 'W', 'Winner'] else 0
+                
+                # Extract or estimate the metrics we need
+                round_score = float(row.get('round_score', 71))
+                sg_total = float(row.get('sg_total', 0))
+                sg_ott = float(row.get('sg_ott', 0))
+                sg_app = float(row.get('sg_app', 0))
+                sg_arg = float(row.get('sg_arg', 0))
+                sg_putt = float(row.get('sg_putt', 0))
+                
+                # Estimate missing metrics based on strokes gained data
+                # These are reasonable estimates based on typical relationships
+                driving_distance = 295 + (sg_ott * 5)  # Estimate: better sg_ott → longer drives
+                driving_accuracy = 65 + (sg_ott * 2)   # Estimate: better sg_ott → better accuracy
+                greens_in_regulation = 65 + (sg_app * 3)  # Estimate: better sg_app → more GIR
+                rough_proximity = 40 - (sg_arg * 2)    # Estimate: better sg_arg → better proximity
+                fairway_proximity = 30 - (sg_app * 2)  # Estimate: better sg_app → better proximity
+                
+                # Create player performance record
+                player_data.append({
+                    'player_name': player_name,
+                    'course': course_name,
+                    'round_score': round_score,
+                    'sg_app': sg_app,
+                    'sg_arg': sg_arg,
+                    'sg_ott': sg_ott,
+                    'sg_putt': sg_putt,
+                    'driving_distance': driving_distance,
+                    'driving_accuracy': driving_accuracy,
+                    'greens_in_regulation': greens_in_regulation,
+                    'rough_proximity': rough_proximity,
+                    'fairway_proximity': fairway_proximity,
+                    'win': win
+                })
+            
+            # Convert to DataFrame
+            self.player_data = pd.DataFrame(player_data)
+            st.success(f"Successfully processed {len(player_data)} real player performance records")
+            
+            # Generate course data based on our mappings
+            course_data = []
+            for event_name, course_info in course_mapping.items():
+                course_name = course_info["name"]
+                
+                # Determine course characteristics based on the name or available data
+                # For now we'll use some reasonable defaults with minor variations
+                if "Augusta" in course_name:
+                    style_bias = "Distance and Putting"
+                    length = np.random.normal(7500, 50)
+                    fairway_width = np.random.normal(35, 3)
+                elif "Sawgrass" in course_name:
+                    style_bias = "Precision"
+                    length = np.random.normal(7200, 50)
+                    fairway_width = np.random.normal(28, 3)
+                elif "Pebble Beach" in course_name:
+                    style_bias = "Short Game"
+                    length = np.random.normal(7000, 50)
+                    fairway_width = np.random.normal(30, 3)
+                else:
+                    style_bias = np.random.choice(["Distance", "Accuracy", "Short Game", "Balanced"])
+                    length = np.random.normal(7300, 200)
+                    fairway_width = np.random.normal(32, 5)
+                
+                course_data.append({
+                    'course_name': course_name,
+                    'course_length': length,
+                    'fairway_width': fairway_width,
+                    'rough_length': np.random.normal(3, 1),
+                    'green_speed': np.random.normal(12, 1),
+                    'green_size': np.random.normal(5000, 1000),
+                    'bunker_count': np.random.randint(40, 100),
+                    'water_hazards': np.random.randint(0, 15),
+                    'elevation_changes': np.random.normal(50, 20),
+                    'style_bias': style_bias,
+                    'lat': course_info["lat"],
+                    'lon': course_info["lon"],
+                    'location': course_info.get("location", "United States")
+                })
+            
+            self.course_data = pd.DataFrame(course_data)
+            st.success(f"Generated data for {len(course_data)} golf courses")
+            
+            # Store data in session state to persist between reruns
+            st.session_state.data_loaded = True
+            st.session_state.player_data = self.player_data
+            st.session_state.course_data = self.course_data
+            
+            return True
+            
+        except Exception as e:
+            st.error(f"Error processing historical data: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc(), language="python")
+            
+            st.info("Falling back to synthetic data...")
+            self.generate_synthetic_data()
+            return True
+    
     def process_api_data(self, rankings_data=None, tournament_data=None, skill_data=None):
         """Process the raw API data into structured dataframes"""
         try:

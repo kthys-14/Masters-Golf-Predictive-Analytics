@@ -45,6 +45,8 @@ The application trains and evaluates multiple machine learning models:
 - Random Forest
 - Gradient Boosting
 
+provide all the scores you used for all the models. How did you validate to make sure the model is good? What metrics did you use? be sure to include all this information in your visualizations. 
+
 The best performing model (based on AUC score) is automatically selected for making predictions.
 
 ## Handling Class Imbalance
@@ -53,6 +55,7 @@ Since tournament wins are rare events (class imbalance), the models use techniqu
 - Class weighting
 - SMOTE (Synthetic Minority Over-sampling Technique)
 - Cost-sensitive evaluation metrics
+- Provide more details on how you handled the class imbalance. 
 
 This ensures the model can effectively identify players with higher win probabilities despite the rareness of wins in the dataset.
 
