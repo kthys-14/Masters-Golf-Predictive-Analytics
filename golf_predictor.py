@@ -978,7 +978,6 @@ class GolfPredictor:
                     
                     # Check for NaN values
                     if any(np.isnan(val) for val in player_stats.values()):
-                        st.warning(f"Player {player} has missing stats. Using defaults.")
                         for feat in self.feature_names:
                             if np.isnan(player_stats[feat]):
                                 player_stats[feat] = 0.0
@@ -1100,7 +1099,6 @@ class GolfPredictor:
             
             # Check for NaN values
             if any(np.isnan(val) for val in player_stats.values()):
-                st.warning(f"Player {player_name} has missing stats. Using defaults.")
                 for feat in self.feature_names:
                     if np.isnan(player_stats[feat]):
                         player_stats[feat] = 0.0
