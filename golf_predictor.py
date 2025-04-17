@@ -47,6 +47,8 @@ if 'model_metrics' not in st.session_state:
     st.session_state.model_metrics = {}
 if 'confusion_matrices' not in st.session_state:
     st.session_state.confusion_matrices = {}
+if 'best_model_name' not in st.session_state:
+    st.session_state.best_model_name = None
 
 class GolfPredictor:
     def __init__(self):
@@ -734,9 +736,58 @@ class GolfPredictor:
         if self.player_data is None:
             raise ValueError("Data not loaded. Call fetch_data_from_api first.")
         
+        # Print columns to debug 
+        st.info(f"Available columns before preprocessing: {self.player_data.columns.tolist()}")
+        
+        # Reset the index to avoid any issues with preserved event_id indices
+        self.player_data = self.player_data.reset_index(drop=True)
+        
+        # Check for and remove any unwanted columns
+        unwanted_columns = [col for col in self.player_data.columns if col not in self.feature_names and col not in ['player_name', 'course', 'win']]
+        if unwanted_columns:
+            st.warning(f"Removing unexpected columns: {unwanted_columns}")
+            self.player_data = self.player_data.drop(columns=unwanted_columns)
+        
         # Get features and target
-        X = self.player_data[self.feature_names]
-        y = self.player_data['win']
+        X = self.player_data[self.feature_names].copy()
+        y = self.player_data['win'].copy()
+        
+        # Ensure all features are numeric
+        for col in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[col]):
+                st.warning(f"Converting non-numeric column {col} to numeric")
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+        
+        # Check for NaN values and handle them
+        if X.isna().any().any():
+            st.warning(f"Found {X.isna().sum().sum()} NaN values in the data. Handling missing values...")
+            
+            # Print number of NaN values per column
+            for col in X.columns:
+                nan_count = X[col].isna().sum()
+                if nan_count > 0:
+                    st.info(f"- {col}: {nan_count} missing values ({(nan_count/len(X))*100:.2f}%)")
+            
+            # Handle missing values in each column appropriately
+            # For numeric features, we'll fill NaNs with the median value of that feature
+            for col in X.columns:
+                if X[col].isna().any():
+                    median_value = X[col].median()
+                    # If median is NaN too (column is all NaN), use 0
+                    if pd.isna(median_value):
+                        median_value = 0
+                    X[col] = X[col].fillna(median_value)
+                    st.info(f"Filled missing values in {col} with median: {median_value:.2f}")
+        
+        # Check again to make sure all NaNs are handled
+        if X.isna().any().any():
+            st.error("Still have NaN values after preprocessing. Filling remaining with zeros.")
+            X = X.fillna(0)
+        
+        # Ensure the target variable is binary
+        if not set(y.unique()).issubset({0, 1}):
+            st.warning(f"Target variable contains non-binary values: {set(y.unique())}. Converting to binary.")
+            y = (y > 0).astype(int)  # Convert any non-zero value to 1
         
         # Split the data
         X_train, X_test, y_train, y_test = train_test_split(
@@ -747,6 +798,12 @@ class GolfPredictor:
         self.scaler = StandardScaler()
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
+        
+        # Convert to numpy arrays with proper shape
+        X_train_scaled = np.asarray(X_train_scaled)
+        X_test_scaled = np.asarray(X_test_scaled)
+        y_train = np.asarray(y_train)
+        y_test = np.asarray(y_test)
         
         return X_train_scaled, X_test_scaled, y_train, y_test
     
@@ -804,18 +861,44 @@ class GolfPredictor:
             except Exception as e:
                 st.warning(f"SMOTE resampling failed: {str(e)}. Skipping Gradient Boosting model.")
             
+            # Initialize session state storage for metrics
+            st.session_state.model_metrics = {}
+            st.session_state.confusion_matrices = {}
+            st.session_state.cv_results = {}
+            
             # Train and evaluate models
             results = {}
             for name, model in models.items():
+                # Additional safety check for NaN values
+                current_X_train = X_train_resampled if name == 'Gradient Boosting' else X_train
+                current_y_train = y_train_resampled if name == 'Gradient Boosting' else y_train
+                
+                # Final NaN check
+                if np.isnan(current_X_train).any():
+                    st.warning(f"Found NaN values in training data for {name}. Replacing with zeros...")
+                    current_X_train = np.nan_to_num(current_X_train, nan=0.0)
+                
+                if np.isnan(current_y_train).any():
+                    st.warning(f"Found NaN values in target data for {name}. This shouldn't happen. Replacing with 0...")
+                    current_y_train = np.nan_to_num(current_y_train, nan=0.0)
+                
                 # Train the model
                 if name == 'Gradient Boosting':
-                    model.fit(X_train_resampled, y_train_resampled)
+                    model.fit(current_X_train, current_y_train)
                 else:
-                    model.fit(X_train, y_train)
+                    model.fit(current_X_train, current_y_train)
+                
+                # Final NaN check for test data too
+                if np.isnan(X_test).any():
+                    st.warning("Found NaN values in test data. Replacing with zeros...")
+                    X_test = np.nan_to_num(X_test, nan=0.0)
                 
                 # Evaluate on test set
                 y_pred = model.predict(X_test)
                 y_prob = model.predict_proba(X_test)[:, 1]
+                
+                # Debug information
+                st.info(f"{name} model predictions shape: {y_pred.shape}, positive predictions: {sum(y_pred)}")
                 
                 # Ensure there's at least one positive prediction
                 if sum(y_pred) == 0:
@@ -826,26 +909,162 @@ class GolfPredictor:
                 
                 # Calculate metrics
                 try:
+                    # Verify what we're working with
+                    st.info(f"Test targets shape: {y_test.shape}, unique values: {np.unique(y_test)}")
+                    st.info(f"Predictions shape: {y_pred.shape}, unique values: {np.unique(y_pred)}")
+                    st.info(f"Probability scores shape: {y_prob.shape}")
+                    
                     accuracy = accuracy_score(y_test, y_pred)
                     # Handle case where precision has zero division
                     precision = precision_score(y_test, y_pred, zero_division=0)
                     recall = recall_score(y_test, y_pred)
                     f1 = f1_score(y_test, y_pred)
                     
+                    # Calculate confusion matrix
+                    cm = confusion_matrix(y_test, y_pred)
+                    st.session_state.confusion_matrices[name] = cm
+                    
                     # Handle case where ROC AUC might fail
+                    auc = 0
                     try:
-                        auc = roc_auc_score(y_test, y_prob)
-                    except Exception:
-                        st.warning(f"ROC AUC calculation failed for {name}. Using F1 score instead.")
+                        # Verify we have the necessary class distribution for AUC
+                        if len(np.unique(y_test)) < 2:
+                            st.warning(f"Only one class present in test set. Cannot calculate AUC.")
+                            auc = f1  # Fallback to F1 score
+                        elif sum(y_test) == 0:
+                            st.warning(f"No positive examples in test set. Cannot calculate AUC.")
+                            auc = f1  # Fallback to F1 score
+                        elif sum(y_test) == len(y_test):
+                            st.warning(f"No negative examples in test set. Cannot calculate AUC.")
+                            auc = f1  # Fallback to F1 score
+                        else:
+                            # Make sure indices are aligned before AUC calculation
+                            y_test_list = y_test.tolist() if hasattr(y_test, 'tolist') else list(y_test)
+                            y_prob_list = y_prob.tolist() if hasattr(y_prob, 'tolist') else list(y_prob)
+                            
+                            # Make sure lengths match
+                            if len(y_test_list) != len(y_prob_list):
+                                st.warning(f"Length mismatch: y_test ({len(y_test_list)}) vs y_prob ({len(y_prob_list)})")
+                                if len(y_test_list) > len(y_prob_list):
+                                    y_test_list = y_test_list[:len(y_prob_list)]
+                                else:
+                                    y_prob_list = y_prob_list[:len(y_test_list)]
+                            
+                            auc = roc_auc_score(y_test_list, y_prob_list)
+                    except Exception as auc_error:
+                        st.warning(f"ROC AUC calculation failed for {name}: {str(auc_error)}. Using F1 score instead.")
                         auc = f1  # Fallback to F1 score
                     
+                    # Calculate R² value (approximation for classification tasks)
+                    # For classification, we use a pseudo-R² based on probability predictions
+                    # Higher values are better, maximum is 1.0
+                    ss_res = np.sum((y_test - y_prob) ** 2)
+                    ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
+                    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                    
+                    # Perform k-fold cross validation
+                    cv_scores = []
+                    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+                    for train_index, val_index in kf.split(X_train):
+                        try:
+                            # Split the data
+                            X_cv_train, X_cv_val = X_train[train_index], X_train[val_index]
+                            y_cv_train, y_cv_val = y_train[train_index], y_train[val_index]
+                            
+                            # Check for any NaN values
+                            if np.isnan(X_cv_train).any() or np.isnan(X_cv_val).any():
+                                st.warning(f"Found NaN values in CV data for {name}. Replacing with zeros...")
+                                X_cv_train = np.nan_to_num(X_cv_train, nan=0.0)
+                                X_cv_val = np.nan_to_num(X_cv_val, nan=0.0)
+                            
+                            # Create and train a new model instance
+                            if name == 'Logistic Regression':
+                                cv_model = LogisticRegression(
+                                    class_weight='balanced',
+                                    max_iter=1000,
+                                    random_state=42,
+                                    solver='liblinear'
+                                )
+                            elif name == 'Random Forest':
+                                cv_model = RandomForestClassifier(
+                                    n_estimators=100,
+                                    max_depth=10,
+                                    min_samples_split=10,
+                                    min_samples_leaf=4,
+                                    class_weight='balanced',
+                                    random_state=42
+                                )
+                            elif name == 'Gradient Boosting':
+                                cv_model = GradientBoostingClassifier(
+                                    n_estimators=100,
+                                    learning_rate=0.1,
+                                    max_depth=5,
+                                    min_samples_split=10,
+                                    min_samples_leaf=4,
+                                    random_state=42
+                                )
+                            
+                            # Apply SMOTE for Gradient Boosting if needed
+                            if name == 'Gradient Boosting':
+                                try:
+                                    smote_cv = SMOTE(random_state=42)
+                                    X_cv_train, y_cv_train = smote_cv.fit_resample(X_cv_train, y_cv_train)
+                                except Exception as e:
+                                    st.warning(f"SMOTE failed in CV fold: {str(e)}")
+                            
+                            # Train and evaluate
+                            cv_model.fit(X_cv_train, y_cv_train)
+                            y_cv_pred = cv_model.predict(X_cv_val)
+                            
+                            # If all predictions are the same, AUC will fail, use F1 instead
+                            try:
+                                # Check class distribution
+                                if len(np.unique(y_cv_val)) < 2:
+                                    cv_score = f1_score(y_cv_val, y_cv_pred, zero_division=0)
+                                    st.warning("Only one class in CV validation set. Using F1 score.")
+                                else:
+                                    y_cv_prob = cv_model.predict_proba(X_cv_val)[:, 1]
+                                    # Convert to lists to avoid index issues
+                                    y_cv_val_list = y_cv_val.tolist() if hasattr(y_cv_val, 'tolist') else list(y_cv_val)
+                                    y_cv_prob_list = y_cv_prob.tolist() if hasattr(y_cv_prob, 'tolist') else list(y_cv_prob)
+                                    cv_score = roc_auc_score(y_cv_val_list, y_cv_prob_list)
+                            except Exception as cv_auc_error:
+                                st.warning(f"CV AUC calculation failed: {str(cv_auc_error)}. Using F1 score.")
+                                cv_score = f1_score(y_cv_val, y_cv_pred, zero_division=0)
+                            
+                            cv_scores.append(cv_score)
+                        except Exception as cv_error:
+                            st.warning(f"Error in cross-validation fold: {str(cv_error)}")
+                            # Skip this fold if there was an error
+                            continue
+                    
+                    # Store CV results
+                    st.session_state.cv_results[name] = {
+                        'scores': cv_scores,
+                        'mean': np.mean(cv_scores),
+                        'std': np.std(cv_scores)
+                    }
+                    
+                    # Store all metrics
                     results[name] = {
                         'accuracy': accuracy,
                         'precision': precision,
                         'recall': recall,
                         'f1': f1,
-                        'auc': auc
+                        'auc': auc,
+                        'r2': r2
                     }
+                    
+                    # Also store in session state for later use
+                    st.session_state.model_metrics[name] = {
+                        'accuracy': accuracy,
+                        'precision': precision,
+                        'recall': recall,
+                        'f1': f1,
+                        'auc': auc,
+                        'r2': r2
+                    }
+                    
                 except Exception as e:
                     st.error(f"Error calculating metrics for {name}: {str(e)}")
                     results[name] = {
@@ -853,8 +1072,10 @@ class GolfPredictor:
                         'precision': 0,
                         'recall': 0,
                         'f1': 0,
-                        'auc': 0
+                        'auc': 0,
+                        'r2': 0
                     }
+                    st.session_state.model_metrics[name] = results[name]
             
             # If no results, fallback to Random Forest
             if not results:
@@ -874,9 +1095,11 @@ class GolfPredictor:
                         'precision': 0.5,
                         'recall': 0.5,
                         'f1': 0.5,
-                        'auc': 0.5
+                        'auc': 0.5,
+                        'r2': 0.5
                     }
                 }
+                st.session_state.model_metrics['Default Random Forest'] = results['Default Random Forest']
                 best_model_name = 'Default Random Forest'
             else:
                 # Select the best model based on AUC (good for imbalanced datasets)
@@ -890,6 +1113,7 @@ class GolfPredictor:
                     self.model.feature_importances_
                 ))
                 results['feature_importance'] = feature_importance
+                st.session_state.model_metrics['feature_importance'] = feature_importance
             
             # Save the model for future use
             try:
@@ -911,6 +1135,13 @@ class GolfPredictor:
             X = self.player_data[self.feature_names]
             y = self.player_data['win']
             
+            # Ensure no NaN values in the fallback model training
+            if X.isna().any().any():
+                st.warning("Found NaN values in data for fallback model. Filling missing values...")
+                X = X.fillna(X.median())
+                # If there are still NaNs (if median was NaN), fill with zeros
+                X = X.fillna(0)
+            
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)
             
@@ -930,7 +1161,8 @@ class GolfPredictor:
                     'precision': 0.5,
                     'recall': 0.5,
                     'f1': 0.5,
-                    'auc': 0.5
+                    'auc': 0.5,
+                    'r2': 0.5
                 }
             }
             
@@ -943,7 +1175,7 @@ class GolfPredictor:
             return results, 'Fallback Random Forest'
     
     def predict_tournament(self, course_name):
-        """Predict win probabilities for all players at a specific course"""
+        """Predict win probabilities for all players at a specific course with enhanced course fit analysis"""
         try:
             if self.model is None:
                 st.error("Model not trained or not available")
@@ -959,7 +1191,13 @@ class GolfPredictor:
                 st.error("Course data not available")
                 return None
             
-            course_info = self.course_data[self.course_data['course_name'] == course_name].iloc[0].to_dict()
+            # Check if the course exists in our data
+            course_data_filtered = self.course_data[self.course_data['course_name'] == course_name]
+            if course_data_filtered.empty:
+                st.error(f"Course '{course_name}' not found in the database")
+                return None
+                
+            course_info = course_data_filtered.iloc[0].to_dict()
             
             # Get unique players
             if self.player_data is None:
@@ -969,97 +1207,132 @@ class GolfPredictor:
             players = self.player_data['player_name'].unique()
             st.info(f"Found {len(players)} players for prediction")
             
-            # For each player, calculate win probability
+            # For each player, calculate win probability with enhanced course fit analysis
             predictions = []
+            error_count = 0
+            success_count = 0
+            
             for player in players:
                 try:
                     # Get player's average stats
-                    player_stats = self.player_data[self.player_data['player_name'] == player][self.feature_names].mean().to_dict()
+                    player_data_subset = self.player_data[self.player_data['player_name'] == player][self.feature_names]
+                    if player_data_subset.empty:
+                        continue
+                        
+                    player_stats = player_data_subset.mean().to_dict()
                     
-                    # Check for NaN values
-                    if any(np.isnan(val) for val in player_stats.values()):
-                        for feat in self.feature_names:
-                            if np.isnan(player_stats[feat]):
-                                player_stats[feat] = 0.0
+                    # Ensure we have stats for all required features
+                    for feature in self.feature_names:
+                        if feature not in player_stats or pd.isna(player_stats[feature]):
+                            player_stats[feature] = 0.0
+                    
+                    # Calculate course fit using our new method
+                    try:
+                        fit_data = self.calculate_course_fit(player_stats, course_info)
+                        course_fit_score = fit_data.get('course_fit_score', 0.5)
+                        fit_adjustment_factor = fit_data.get('fit_adjustment_factor', 1.0)
+                    except Exception as e:
+                        st.warning(f"Error calculating course fit for {player}: {str(e)}")
+                        # Use default values if there's an error
+                        fit_data = {
+                            'course_fit_score': 0.5,
+                            'fit_adjustment_factor': 1.0,
+                            'strengths': [],
+                            'weaknesses': [],
+                            'skill_scores': {}
+                        }
+                        course_fit_score = 0.5
+                        fit_adjustment_factor = 1.0
                     
                     # Apply course-specific adjustments to player stats
                     adjusted_stats = player_stats.copy()
                     
-                    # 1. Adjust based on course style bias
-                    course_style = course_info['style_bias']
+                    # Apply skill-specific adjustments based on course profile
+                    for skill, importance_key in [
+                        ('sg_ott', 'distance_importance'),
+                        ('driving_distance', 'distance_importance'),
+                        ('driving_accuracy', 'accuracy_importance'),
+                        ('sg_app', 'approach_importance'),
+                        ('sg_arg', 'short_game_importance'),
+                        ('sg_putt', 'putting_importance')
+                    ]:
+                        if skill in adjusted_stats:
+                            importance = fit_data['course_profile'][importance_key]
+                            # Apply more significant boosts/penalties to create more variation
+                            if importance > 0.7:  # This skill is very important at this course
+                                # Boost or penalize based on player's skill level
+                                rating_key = importance_key.replace('importance', 'rating')
+                                player_rating = fit_data['player_profile'][rating_key]
+                                
+                                # More dramatic adjustment curve (cubic function)
+                                curve_factor = (player_rating - 0.5) * 3  # Range: -1.5 to 1.5
+                                adjustment = 1.0 + (0.2 * (curve_factor ** 3))  # Cubic curve for more separation
+                                
+                                # Apply adjustment
+                                adjusted_stats[skill] *= adjustment
                     
-                    if "Distance" in course_style:
-                        # For distance-favoring courses, boost distance-related stats
-                        if player_stats['driving_distance'] > 300:  # Long hitters benefit
-                            adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 1.2
-                            adjusted_stats['driving_distance'] = player_stats['driving_distance'] * 1.05
-                        else:  # Shorter hitters struggle
-                            adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 0.9
+                    # Add historical performance boost if available
+                    player_at_course = self.player_data[(self.player_data['player_name'] == player) & 
+                                                     (self.player_data['course'] == course_name)]
                     
-                    if "Precision" in course_style or "Accuracy" in course_style:
-                        # For precision courses, boost accuracy stats for accurate players
-                        if player_stats['driving_accuracy'] > 65:  # Accurate players benefit
-                            adjusted_stats['sg_app'] = player_stats['sg_app'] * 1.15
-                            adjusted_stats['driving_accuracy'] = player_stats['driving_accuracy'] * 1.05
-                        else:  # Less accurate players struggle
-                            adjusted_stats['sg_app'] = player_stats['sg_app'] * 0.9
+                    if not player_at_course.empty:
+                        historical_win_rate = player_at_course['win'].mean()
+                        top10_rate = player_at_course['top_10'].mean() if 'top_10' in player_at_course.columns else 0
+                        
+                        # More significant historical performance boost
+                        historical_boost = 1.0 + (historical_win_rate * 4.0) + (top10_rate * 0.5)
+                        
+                        for key in adjusted_stats:
+                            adjusted_stats[key] *= historical_boost
                     
-                    if "Putting" in course_style:
-                        # For putting-focused courses, boost putting stats for good putters
-                        if player_stats['sg_putt'] > 0.5:  # Good putters benefit
-                            adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.25
-                        else:  # Average putters don't get a boost
-                            adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.0
-                    
-                    if "Short Game" in course_style:
-                        # For short game courses, boost around-the-green stats
-                        if player_stats['sg_arg'] > 0.4:  # Good short game players benefit
-                            adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 1.3
-                        else:  # Weak short game players struggle
-                            adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 0.85
-                    
-                    # 2. Adjust based on course length
-                    if course_info['course_length'] > 7400:  # Long course
-                        # Long hitters get an advantage
-                        driving_distance_boost = (player_stats['driving_distance'] - 290) / 100
-                        adjusted_stats['sg_ott'] += max(0, driving_distance_boost * 0.3)
-                    elif course_info['course_length'] < 7100:  # Shorter course
-                        # Less of a driving distance advantage, more about accuracy
-                        adjusted_stats['sg_app'] *= 1.1
-                        adjusted_stats['sg_arg'] *= 1.1
-                    
-                    # 3. Special player-course fit adjustments
-                    # Some players historically perform better at certain courses
+                    # Special player-course fit adjustments
+                    # These are course-specific advantages for certain players that go beyond the data
                     if player in ["Tiger Woods", "Jordan Spieth"] and "Augusta" in course_name:
                         for key in adjusted_stats:
-                            adjusted_stats[key] *= 1.15  # 15% boost to all stats at Augusta
+                            adjusted_stats[key] *= 1.25  # 25% boost at Augusta
                     
                     if player in ["Rory McIlroy", "Brooks Koepka"] and "Bethpage" in course_name:
-                        adjusted_stats['sg_ott'] *= 1.2  # 20% boost to off-the-tee at Bethpage
+                        adjusted_stats['sg_ott'] *= 1.3  # 30% boost at Bethpage
                     
-                    # 4. Apply the adjusted stats to make the prediction
-                    adjusted_array = np.array([adjusted_stats[feature] for feature in self.feature_names]).reshape(1, -1)
-                    adjusted_scaled = self.scaler.transform(adjusted_array)
-                    win_prob = self.model.predict_proba(adjusted_scaled)[0, 1]
+                    # Make prediction with adjusted stats
+                    # Create a DataFrame with standardized features
+                    adjusted_df = self.prepare_prediction_features(adjusted_stats)
                     
-                    # 5. Add a small random variation to make predictions more realistic
-                    # (within 5% of the base prediction)
-                    win_prob = win_prob * np.random.uniform(0.97, 1.03)
-                    # Ensure probability stays in valid range
-                    win_prob = min(max(win_prob, 0.001), 0.999)
+                    # Transform the data
+                    adjusted_scaled = self.scaler.transform(adjusted_df)
+                    base_win_prob = self.model.predict_proba(adjusted_scaled)[0, 1]
                     
-                    predictions.append({
+                    # Apply direct course fit modifier to the win probability
+                    # Use a sigmoid function to make differences more pronounced
+                    fit_modifier = 1.0 / (1.0 + np.exp(-5 * (course_fit_score - 0.5)))  # Sigmoid centered at 0.5
+                    win_prob = base_win_prob * (0.5 + fit_modifier)
+                    
+                    # Add a small random variation for realism
+                    win_prob *= np.random.uniform(0.97, 1.03)
+                    win_prob = min(max(win_prob, 0.001), 0.999)  # Clamp to valid range
+                    
+                    # Create rich prediction data
+                    player_prediction = {
                         'player': player,
-                        'win_probability': win_prob
-                    })
+                        'win_probability': win_prob,
+                        'course_fit_score': course_fit_score,
+                        'strengths': fit_data.get('strengths', []),  # Use .get() to provide a default empty list
+                        'weaknesses': fit_data.get('weaknesses', []),  # Use .get() to provide a default empty list
+                        'skill_scores': fit_data.get('skill_scores', {})  # Use .get() to provide a default empty dict
+                    }
+                    
+                    predictions.append(player_prediction)
+                    
                 except Exception as e:
                     st.warning(f"Error predicting for player {player}: {str(e)}")
-                
+                    error_count += 1
+                    success_count += 1
+            
             # Sort by win probability (descending)
             predictions = sorted(predictions, key=lambda x: x['win_probability'], reverse=True)
             
             # Debug summary
-            st.info(f"Generated predictions for {len(predictions)} players")
+            st.info(f"Generated predictions for {len(predictions)} players at {course_name}")
             
             return predictions
         
@@ -1070,7 +1343,7 @@ class GolfPredictor:
             return None
 
     def predict_player_across_courses(self, player_name):
-        """Predict win probabilities for a specific player across all courses"""
+        """Predict win probabilities for a specific player across all courses with enhanced course fit analysis"""
         try:
             if self.model is None:
                 st.error("Model not trained or not available")
@@ -1093,102 +1366,135 @@ class GolfPredictor:
             if self.player_data is None:
                 st.error("Player data not available")
                 return None
-            
+                
+            # Check if player exists in our data
+            player_data_subset = self.player_data[self.player_data['player_name'] == player_name][self.feature_names]
+            if player_data_subset.empty:
+                st.error(f"Player '{player_name}' not found in the database")
+                return None
+                
             # Get base player stats
-            player_stats = self.player_data[self.player_data['player_name'] == player_name][self.feature_names].mean().to_dict()
+            player_stats = player_data_subset.mean().to_dict()
             
-            # Check for NaN values
-            if any(np.isnan(val) for val in player_stats.values()):
-                for feat in self.feature_names:
-                    if np.isnan(player_stats[feat]):
-                        player_stats[feat] = 0.0
+            # Ensure we have stats for all required features
+            for feature in self.feature_names:
+                if feature not in player_stats or pd.isna(player_stats[feature]):
+                    player_stats[feature] = 0.0
             
-            # For each course, calculate win probability with course-specific adjustments
+            # For each course, calculate win probability with enhanced course fit analysis
             predictions = []
             for course in courses:
-                # Get course details
-                course_row = self.course_data[self.course_data['course_name'] == course].iloc[0]
+                try:
+                    # Get course details
+                    course_row = self.course_data[self.course_data['course_name'] == course].iloc[0].to_dict()
+                    
+                    # Calculate course fit using our new method
+                    try:
+                        fit_data = self.calculate_course_fit(player_stats, course_row)
+                        course_fit_score = fit_data.get('course_fit_score', 0.5)
+                        fit_adjustment_factor = fit_data.get('fit_adjustment_factor', 1.0)
+                    except Exception as e:
+                        st.warning(f"Error calculating course fit for {player_name} at {course}: {str(e)}")
+                        # Use default values if there's an error
+                        fit_data = {
+                            'course_fit_score': 0.5,
+                            'fit_adjustment_factor': 1.0,
+                            'strengths': [],
+                            'weaknesses': [],
+                            'skill_scores': {}
+                        }
+                        course_fit_score = 0.5
+                        fit_adjustment_factor = 1.0
+                    
+                    # Apply course-specific adjustments to player stats
+                    adjusted_stats = player_stats.copy()
+                    
+                    # Apply skill-specific adjustments based on course profile
+                    for skill, importance_key in [
+                        ('sg_ott', 'distance_importance'),
+                        ('driving_distance', 'distance_importance'),
+                        ('driving_accuracy', 'accuracy_importance'),
+                        ('sg_app', 'approach_importance'),
+                        ('sg_arg', 'short_game_importance'),
+                        ('sg_putt', 'putting_importance')
+                    ]:
+                        if skill in adjusted_stats:
+                            importance = fit_data['course_profile'][importance_key]
+                            # Apply more significant boosts/penalties to create more variation
+                            if importance > 0.7:  # This skill is very important at this course
+                                # Boost or penalize based on player's skill level
+                                rating_key = importance_key.replace('importance', 'rating')
+                                player_rating = fit_data['player_profile'][rating_key]
+                                
+                                # More dramatic adjustment curve (cubic function)
+                                curve_factor = (player_rating - 0.5) * 3  # Range: -1.5 to 1.5
+                                adjustment = 1.0 + (0.2 * (curve_factor ** 3))  # Cubic curve for more separation
+                                
+                                # Apply adjustment
+                                adjusted_stats[skill] *= adjustment
+                    
+                    # Add historical performance boost if available
+                    player_at_course = self.player_data[(self.player_data['player_name'] == player_name) & 
+                                                     (self.player_data['course'] == course)]
+                    
+                    if not player_at_course.empty:
+                        historical_win_rate = player_at_course['win'].mean()
+                        top10_rate = player_at_course['top_10'].mean() if 'top_10' in player_at_course.columns else 0
+                        
+                        # More significant historical performance boost
+                        historical_boost = 1.0 + (historical_win_rate * 4.0) + (top10_rate * 0.5)
+                        
+                        for key in adjusted_stats:
+                            adjusted_stats[key] *= historical_boost
+                    
+                    # Special player-course fit adjustments
+                    if player_name in ["Tiger Woods", "Jordan Spieth"] and "Augusta" in course:
+                        for key in adjusted_stats:
+                            adjusted_stats[key] *= 1.25  # 25% boost at Augusta
+                    
+                    if player_name in ["Rory McIlroy", "Brooks Koepka"] and "Bethpage" in course:
+                        adjusted_stats['sg_ott'] *= 1.3  # 30% boost at Bethpage
+                    
+                    # Make prediction with adjusted stats
+                    # Create a DataFrame with standardized features
+                    adjusted_df = self.prepare_prediction_features(adjusted_stats)
+                    
+                    # Transform the data
+                    adjusted_scaled = self.scaler.transform(adjusted_df)
+                    base_win_prob = self.model.predict_proba(adjusted_scaled)[0, 1]
+                    
+                    # Apply direct course fit modifier to the win probability
+                    # Use a sigmoid function to make differences more pronounced
+                    fit_modifier = 1.0 / (1.0 + np.exp(-5 * (course_fit_score - 0.5)))  # Sigmoid centered at 0.5
+                    win_prob = base_win_prob * (0.5 + fit_modifier)
+                    
+                    # Add a small random variation for realism
+                    win_prob *= np.random.uniform(0.97, 1.03)
+                    win_prob = min(max(win_prob, 0.001), 0.999)  # Clamp to valid range
+                    
+                    # Create rich prediction data with geographical information
+                    course_prediction = {
+                        'course': course,
+                        'win_probability': win_prob,
+                        'course_fit_score': course_fit_score,
+                        'strengths': fit_data.get('strengths', []),  # Use .get() to provide a default empty list
+                        'weaknesses': fit_data.get('weaknesses', []),  # Use .get() to provide a default empty list
+                        'lat': course_row.get('lat', 0),
+                        'lon': course_row.get('lon', 0),
+                        'location': course_row.get('location', ''),
+                        'skill_scores': fit_data.get('skill_scores', {})  # Use .get() to provide a default empty dict
+                    }
+                    
+                    predictions.append(course_prediction)
                 
-                # Apply course-specific adjustments to player stats
-                # This creates a copy of player stats that we'll adjust based on course characteristics
-                adjusted_stats = player_stats.copy()
-                
-                # 1. Adjust based on course style bias
-                course_style = course_row['style_bias']
-                
-                if "Distance" in course_style:
-                    # For distance-favoring courses, boost distance-related stats
-                    if player_stats['driving_distance'] > 300:  # Long hitters benefit
-                        adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 1.2
-                        adjusted_stats['driving_distance'] = player_stats['driving_distance'] * 1.05
-                    else:  # Shorter hitters struggle
-                        adjusted_stats['sg_ott'] = player_stats['sg_ott'] * 0.9
-                
-                if "Precision" in course_style or "Accuracy" in course_style:
-                    # For precision courses, boost accuracy stats for accurate players
-                    if player_stats['driving_accuracy'] > 65:  # Accurate players benefit
-                        adjusted_stats['sg_app'] = player_stats['sg_app'] * 1.15
-                        adjusted_stats['driving_accuracy'] = player_stats['driving_accuracy'] * 1.05
-                    else:  # Less accurate players struggle
-                        adjusted_stats['sg_app'] = player_stats['sg_app'] * 0.9
-                
-                if "Putting" in course_style:
-                    # For putting-focused courses, boost putting stats for good putters
-                    if player_stats['sg_putt'] > 0.5:  # Good putters benefit
-                        adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.25
-                    else:  # Average putters don't get a boost
-                        adjusted_stats['sg_putt'] = player_stats['sg_putt'] * 1.0
-                
-                if "Short Game" in course_style:
-                    # For short game courses, boost around-the-green stats
-                    if player_stats['sg_arg'] > 0.4:  # Good short game players benefit
-                        adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 1.3
-                    else:  # Weak short game players struggle
-                        adjusted_stats['sg_arg'] = player_stats['sg_arg'] * 0.85
-                
-                # 2. Adjust based on course length
-                if course_row['course_length'] > 7400:  # Long course
-                    # Long hitters get an advantage
-                    driving_distance_boost = (player_stats['driving_distance'] - 290) / 100
-                    adjusted_stats['sg_ott'] += max(0, driving_distance_boost * 0.3)
-                elif course_row['course_length'] < 7100:  # Shorter course
-                    # Less of a driving distance advantage, more about accuracy
-                    adjusted_stats['sg_app'] *= 1.1
-                    adjusted_stats['sg_arg'] *= 1.1
-                
-                # 3. Special player-course fit adjustments
-                # Some players historically perform better at certain courses
-                if player_name in ["Tiger Woods", "Jordan Spieth"] and "Augusta" in course:
-                    for key in adjusted_stats:
-                        adjusted_stats[key] *= 1.15  # 15% boost to all stats at Augusta
-                
-                if player_name in ["Rory McIlroy", "Brooks Koepka"] and "Bethpage" in course:
-                    adjusted_stats['sg_ott'] *= 1.2  # 20% boost to off-the-tee at Bethpage
-                
-                # 4. Apply the adjusted stats to make the prediction
-                adjusted_array = np.array([adjusted_stats[feature] for feature in self.feature_names]).reshape(1, -1)
-                adjusted_scaled = self.scaler.transform(adjusted_array)
-                win_prob = self.model.predict_proba(adjusted_scaled)[0, 1]
-                
-                # 5. Add a small random variation to make predictions more realistic
-                # (within 10% of the base prediction)
-                win_prob = win_prob * np.random.uniform(0.95, 1.05)
-                # Ensure probability stays in valid range
-                win_prob = min(max(win_prob, 0.001), 0.999)
-                
-                predictions.append({
-                    'course': course,
-                    'win_probability': win_prob,
-                    'lat': course_row['lat'],
-                    'lon': course_row['lon'],
-                    'location': course_row['location']
-                })
+                except Exception as e:
+                    st.warning(f"Error predicting for course {course}: {str(e)}")
             
             # Sort by win probability (descending)
             predictions = sorted(predictions, key=lambda x: x['win_probability'], reverse=True)
             
             # Debug summary
-            st.info(f"Generated predictions for {len(predictions)} courses")
+            st.info(f"Generated predictions for player {player_name} across {len(predictions)} courses")
             
             return predictions
         
@@ -1197,6 +1503,178 @@ class GolfPredictor:
             import traceback
             st.code(traceback.format_exc(), language="python")
             return None
+
+    def prepare_prediction_features(self, player_stats):
+        """
+        Prepare prediction features in a standardized way to avoid dimension mismatches
+        
+        Args:
+            player_stats: Dictionary of player statistics
+            
+        Returns:
+            DataFrame with correctly formatted features for prediction
+        """
+        # Ensure all required features exist
+        for feature in self.feature_names:
+            if feature not in player_stats or pd.isna(player_stats[feature]):
+                player_stats[feature] = 0.0
+        
+        # Create DataFrame with the exact feature set needed
+        features_df = pd.DataFrame([player_stats], columns=self.feature_names)
+        
+        # Keep only required features in the correct order
+        features_df = features_df[self.feature_names]
+        
+        # Check for NaN values
+        if features_df.isna().any().any():
+            features_df = features_df.fillna(0.0)
+        
+        return features_df
+
+    def calculate_course_fit(self, player_stats, course_info):
+        """
+        Calculate how well a player's skills match a specific course
+        
+        Args:
+            player_stats: Dictionary of player statistics
+            course_info: Dictionary of course characteristics
+            
+        Returns:
+            fit_data: Dictionary with fit score, strengths and weaknesses
+        """
+        try:
+            # Calculate player style profile - what is this player good at?
+            player_profile = {
+                'distance_rating': min(1.0, max(0.0, (player_stats.get('driving_distance', 290) - 280) / 40)),
+                'accuracy_rating': min(1.0, max(0.0, (player_stats.get('driving_accuracy', 65) - 50) / 30)),
+                'approach_rating': min(1.0, max(0.0, (player_stats.get('sg_app', 0) + 0.5) / 1.5)),
+                'short_game_rating': min(1.0, max(0.0, (player_stats.get('sg_arg', 0) + 0.5) / 1.5)),
+                'putting_rating': min(1.0, max(0.0, (player_stats.get('sg_putt', 0) + 0.5) / 1.5))
+            }
+            
+            # Create course profile - what skills are most important at this course
+            course_profile = {
+                'distance_importance': 0.5,  # Default values
+                'accuracy_importance': 0.5,
+                'approach_importance': 0.5,
+                'short_game_importance': 0.5,
+                'putting_importance': 0.5
+            }
+            
+            # Set course profile based on style bias
+            course_style = course_info.get('style_bias', "Balanced")
+            
+            if isinstance(course_style, str):  # Ensure course_style is a string
+                if "Distance" in course_style:
+                    course_profile['distance_importance'] = 0.9
+                    course_profile['accuracy_importance'] = 0.3
+                if "Precision" in course_style or "Accuracy" in course_style:
+                    course_profile['accuracy_importance'] = 0.9
+                    course_profile['approach_importance'] = 0.7
+                if "Putting" in course_style:
+                    course_profile['putting_importance'] = 0.9
+                if "Short Game" in course_style:
+                    course_profile['short_game_importance'] = 0.9
+            
+            # Adjust based on course length
+            course_length = course_info.get('course_length', 7200)
+            if course_length > 7400:  # Long course
+                course_profile['distance_importance'] += 0.2
+                course_profile['accuracy_importance'] -= 0.1
+            elif course_length < 7100:  # Shorter course
+                course_profile['distance_importance'] -= 0.2
+                course_profile['accuracy_importance'] += 0.2
+                course_profile['approach_importance'] += 0.2
+            
+            # Adjust based on fairway width
+            fairway_width = course_info.get('fairway_width', 33)  # Default if not available
+            if fairway_width < 30:  # Narrow fairways
+                course_profile['accuracy_importance'] += 0.3
+                course_profile['distance_importance'] -= 0.1
+            elif fairway_width > 35:  # Wide fairways
+                course_profile['accuracy_importance'] -= 0.2
+                course_profile['distance_importance'] += 0.2
+            
+            # Normalize all importance values between 0 and 1
+            for key in course_profile:
+                course_profile[key] = max(0.0, min(1.0, course_profile[key]))
+            
+            # Calculate weighted skill scores
+            skill_scores = {}
+            for skill_name, rating_key in [
+                ('Distance', 'distance_rating'),
+                ('Accuracy', 'accuracy_rating'),
+                ('Approach', 'approach_rating'),
+                ('Short Game', 'short_game_rating'),
+                ('Putting', 'putting_rating')
+            ]:
+                importance_key = rating_key.replace('rating', 'importance')
+                skill_scores[skill_name] = {
+                    'rating': player_profile[rating_key],
+                    'importance': course_profile[importance_key],
+                    'weighted_score': player_profile[rating_key] * course_profile[importance_key]
+                }
+            
+            # Calculate overall course fit score
+            total_weighted_score = sum(s['weighted_score'] for s in skill_scores.values())
+            total_importance = sum(s['importance'] for s in skill_scores.values()) or 1  # Avoid division by zero
+            course_fit_score = total_weighted_score / total_importance
+            
+            # Identify strengths and weaknesses relevant to this course
+            strengths = []
+            weaknesses = []
+            
+            # Sort skills by their weighted score (importance * rating)
+            sorted_skills = sorted(
+                [(name, data) for name, data in skill_scores.items()],
+                key=lambda x: x[1]['weighted_score'],
+                reverse=True
+            )
+            
+            # Top 2 skills are strengths if they're important for this course
+            for skill_name, data in sorted_skills[:2]:
+                if data['importance'] > 0.6 and data['rating'] > 0.5:
+                    strengths.append({
+                        'skill': skill_name,
+                        'rating': data['rating'],
+                        'importance': data['importance'],
+                        'description': f"Strong {skill_name.lower()} on a course that values it"
+                    })
+            
+            # Bottom skills are weaknesses if they're important for this course
+            for skill_name, data in sorted_skills[-2:]:
+                if data['importance'] > 0.6 and data['rating'] < 0.5:
+                    weaknesses.append({
+                        'skill': skill_name,
+                        'rating': data['rating'],
+                        'importance': data['importance'],
+                        'description': f"Weak {skill_name.lower()} on a course that requires it"
+                    })
+            
+            # Calculate fit adjustment factor (0.7 to 1.4 range for more differentiation)
+            fit_adjustment_factor = 0.7 + (course_fit_score * 0.7)
+            
+            return {
+                'course_fit_score': course_fit_score,
+                'fit_adjustment_factor': fit_adjustment_factor,
+                'skill_scores': skill_scores,
+                'strengths': strengths,
+                'weaknesses': weaknesses,
+                'player_profile': player_profile,
+                'course_profile': course_profile
+            }
+        except Exception as e:
+            # Log the error but return a valid structure with defaults
+            print(f"Error in calculate_course_fit: {str(e)}")
+            return {
+                'course_fit_score': 0.5,  # Default middle value
+                'fit_adjustment_factor': 1.0,  # No adjustment
+                'skill_scores': {},
+                'strengths': [],
+                'weaknesses': [],
+                'player_profile': {},
+                'course_profile': {}
+            }
 
 # Streamlit Application
 def main():
@@ -1287,6 +1765,7 @@ def main():
                         try:
                             results, best_model = predictor.train_models()
                             st.session_state.model_trained = True
+                            st.session_state.best_model_name = best_model
                             st.success(f"Model training complete! Best model: {best_model}")
                         except Exception as e:
                             st.error(f"Error training model: {str(e)}")
@@ -1358,15 +1837,20 @@ def main():
                                 
                                 if predictions and len(predictions) > 0:
                                     # Create DataFrame from predictions
-                                    predictions_df = pd.DataFrame(predictions)
+                                    predictions_df = pd.DataFrame([
+                                        {
+                                            'Player': p['player'],
+                                            'Win Probability (%)': p['win_probability'] * 100,
+                                            'Course Fit Score': p.get('course_fit_score', 0) * 100,
+                                            'Strengths': '; '.join([s.get('description', 'Unknown strength') for s in p.get('strengths', []) if isinstance(s, dict)]) if p.get('strengths') else 'None',
+                                            'Weaknesses': '; '.join([w.get('description', 'Unknown weakness') for w in p.get('weaknesses', []) if isinstance(w, dict)]) if p.get('weaknesses') else 'None'
+                                        } 
+                                        for p in predictions
+                                    ])
                                     
                                     # Filter by selected players if any
                                     if selected_players:
-                                        predictions_df = predictions_df[predictions_df['player'].isin(selected_players)]
-                                    
-                                    # Format probabilities as percentages
-                                    predictions_df['win_probability'] = predictions_df['win_probability'] * 100
-                                    predictions_df.columns = ['Player', 'Win Probability (%)']
+                                        predictions_df = predictions_df[predictions_df['Player'].isin(selected_players)]
                                     
                                     # Show course information
                                     course_info = predictor.course_data[predictor.course_data['course_name'] == selected_course].iloc[0]
@@ -1398,62 +1882,107 @@ def main():
                                     # Display table with formatting
                                     st.subheader("Predicted Win Probabilities")
                                     st.dataframe(
-                                        predictions_df.style.format({'Win Probability (%)': '{:.2f}%'})
-                                                            .background_gradient(subset=['Win Probability (%)'], cmap='Blues'),
+                                        predictions_df.style.format({
+                                            'Win Probability (%)': '{:.2f}%',
+                                            'Course Fit Score': '{:.1f}%'
+                                        }).background_gradient(subset=['Win Probability (%)'], cmap='Blues')
+                                         .background_gradient(subset=['Course Fit Score'], cmap='Greens'),
                                         height=400
                                     )
                                     
-                                    # Visualization
-                                    st.subheader("Visualization")
-                                    
-                                    # Show clear error if empty
-                                    if predictions_df.empty:
-                                        st.warning("No data to visualize. Try selecting different players.")
-                                    else:
-                                        # Limit to top 10 if not filtering
-                                        if not selected_players:
-                                            display_df = predictions_df.head(10)
-                                            title = "Top 10 Players' Win Probabilities"
-                                        else:
-                                            display_df = predictions_df
-                                            title = "Selected Players' Win Probabilities"
-                                        
-                                        try:
-                                            # Create figure
-                                            fig, ax = plt.subplots(figsize=(10, 6))
+                                    # Show detailed analysis for top players
+                                    st.subheader("Player-Course Analysis")
+                                    for i, prediction in enumerate(predictions[:5]):  # Top 5 players
+                                        if selected_players and prediction['player'] not in selected_players:
+                                            continue
                                             
-                                            # Sort values for better visualization
-                                            display_df = display_df.sort_values('Win Probability (%)')
+                                        with st.expander(f"📊 {prediction['player']} at {selected_course}"):
+                                            # Display course fit information
+                                            col1, col2 = st.columns([1, 1])
                                             
-                                            # Plot horizontal bars
-                                            bars = ax.barh(
-                                                display_df['Player'], 
-                                                display_df['Win Probability (%)'],
-                                                color='skyblue'
-                                            )
+                                            with col1:
+                                                st.markdown(f"**Win Probability: {prediction['win_probability']*100:.2f}%**")
+                                                st.markdown(f"**Course Fit Score: {prediction['course_fit_score']*100:.1f}%**")
+                                                
+                                                # Display strengths
+                                                if prediction.get('strengths') and isinstance(prediction.get('strengths'), list):
+                                                    st.markdown("**Player Strengths on this Course:**")
+                                                    for strength in prediction.get('strengths', []):
+                                                        if isinstance(strength, dict):
+                                                            skill = strength.get('skill', 'Unknown')
+                                                            rating = strength.get('rating', 0)
+                                                            importance = strength.get('importance', 0)
+                                                            st.markdown(f"- {skill}: {rating*100:.0f}% skill rating on a course that values it ({importance*100:.0f}% importance)")
+                                                        else:
+                                                            st.markdown(f"- {str(strength)}")
+                                                else:
+                                                    st.markdown("**Player Strengths on this Course:** None identified")
+                                                
+                                                # Display weaknesses
+                                                if prediction.get('weaknesses') and isinstance(prediction.get('weaknesses'), list):
+                                                    st.markdown("**Player Weaknesses on this Course:**")
+                                                    for weakness in prediction.get('weaknesses', []):
+                                                        if isinstance(weakness, dict):
+                                                            skill = weakness.get('skill', 'Unknown')
+                                                            rating = weakness.get('rating', 0)
+                                                            importance = weakness.get('importance', 0)
+                                                            st.markdown(f"- {skill}: {rating*100:.0f}% skill rating on a course that requires it ({importance*100:.0f}% importance)")
+                                                        else:
+                                                            st.markdown(f"- {str(weakness)}")
+                                                else:
+                                                    st.markdown("**Player Weaknesses on this Course:** None identified")
                                             
-                                            # Add labels
-                                            for bar in bars:
-                                                width = bar.get_width()
-                                                ax.text(
-                                                    width + 0.5, 
-                                                    bar.get_y() + bar.get_height()/2,
-                                                    f'{width:.2f}%',
-                                                    ha='left',
-                                                    va='center'
-                                                )
-                                            
-                                            # Set labels and title
-                                            ax.set_xlabel('Win Probability (%)')
-                                            ax.set_ylabel('Player')
-                                            ax.set_title(f'{title} at {selected_course}')
-                                            ax.grid(axis='x', linestyle='--', alpha=0.7)
-                                            
-                                            # Display plot
-                                            st.pyplot(fig)
-                                        except Exception as e:
-                                            st.error(f"Error creating visualization: {str(e)}")
-                                            st.info("Try selecting fewer players or a different course")
+                                            with col2:
+                                                # Create a radar chart of player skills vs course demands
+                                                try:
+                                                    skill_scores = prediction.get('skill_scores', {})
+                                                    if skill_scores and isinstance(skill_scores, dict):
+                                                        categories = list(skill_scores.keys())
+                                                        player_values = []
+                                                        course_values = []
+                                                        
+                                                        for skill in categories:
+                                                            skill_data = skill_scores.get(skill, {})
+                                                            if isinstance(skill_data, dict):
+                                                                player_values.append(skill_data.get('rating', 0))
+                                                                course_values.append(skill_data.get('importance', 0))
+                                                            else:
+                                                                player_values.append(0)
+                                                                course_values.append(0)
+                                                        
+                                                        # Only create chart if we have data
+                                                        if categories and player_values and course_values:
+                                                            import matplotlib.pyplot as plt
+                                                            
+                                                            fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+                                                            
+                                                            # Plot the player skills and course demands
+                                                            angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+                                                            angles += angles[:1]  # Close the polygon
+                                                            
+                                                            player_values += player_values[:1]  # Close the polygon
+                                                            course_values += course_values[:1]  # Close the polygon
+                                                            
+                                                            ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
+                                                            ax.fill(angles, player_values, 'r', alpha=0.2)
+                                                            
+                                                            ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
+                                                            ax.fill(angles, course_values, 'b', alpha=0.2)
+                                                            
+                                                            ax.set_thetagrids(np.degrees(angles[:-1]), categories)
+                                                            ax.set_ylim(0, 1)
+                                                            ax.grid(True)
+                                                            ax.legend(loc='upper right')
+                                                            
+                                                            plt.title(f"{prediction['player']}'s Fit with {selected_course}")
+                                                            st.pyplot(fig)
+                                                        else:
+                                                            st.warning("Insufficient data to create skill radar chart")
+                                                    else:
+                                                        st.warning("Player skill scores not available")
+                                                except Exception as e:
+                                                    st.error(f"Error creating chart: {str(e)}")
+                                                    st.info("We're still processing this player's full profile")
                                 else:
                                     st.error("No predictions were generated. Please check the model.")
                             except Exception as e:
@@ -1479,145 +2008,133 @@ def main():
                                     
                                     if predictions and len(predictions) > 0:
                                         # Create DataFrame from predictions
-                                        predictions_df = pd.DataFrame(predictions)
+                                        predictions_df = pd.DataFrame([
+                                            {
+                                                'Player': p['player'],
+                                                'Win Probability (%)': p['win_probability'] * 100,
+                                                'Course Fit Score': p.get('course_fit_score', 0) * 100,
+                                                'Strengths': '; '.join([s.get('description', 'Unknown strength') for s in p.get('strengths', []) if isinstance(s, dict)]) if p.get('strengths') else 'None',
+                                                'Weaknesses': '; '.join([w.get('description', 'Unknown weakness') for w in p.get('weaknesses', []) if isinstance(w, dict)]) if p.get('weaknesses') else 'None'
+                                            } 
+                                            for p in predictions
+                                        ])
                                         
-                                        # Format probabilities as percentages
-                                        predictions_df['win_probability'] = predictions_df['win_probability'] * 100
+                                        # Filter by selected players if any
+                                        if selected_players:
+                                            predictions_df = predictions_df[predictions_df['Player'].isin(selected_players)]
                                         
-                                        # Display player information
-                                        st.subheader(f"Player: {selected_player}")
+                                        # Show course information
+                                        course_info = predictor.course_data[predictor.course_data['course_name'] == selected_course].iloc[0]
+                                        st.subheader(f"Course: {selected_course}")
                                         
-                                        # Get player stats
-                                        player_stats = predictor.player_data[predictor.player_data['player_name'] == selected_player][predictor.feature_names].mean()
-                                        
-                                        # Show stats and choropleth map side by side
-                                        col1, col2 = st.columns([1, 2])
+                                        # Display course info and map side by side
+                                        col1, col2 = st.columns([1, 1])
                                         
                                         with col1:
-                                            st.subheader("Player Stats (Averages)")
-                                            st.write(f"**Strokes Gained: Approach:** {player_stats['sg_app']:.2f}")
-                                            st.write(f"**Strokes Gained: Around Green:** {player_stats['sg_arg']:.2f}")
-                                            st.write(f"**Strokes Gained: Off the Tee:** {player_stats['sg_ott']:.2f}")
-                                            st.write(f"**Strokes Gained: Putting:** {player_stats['sg_putt']:.2f}")
-                                            st.write(f"**Driving Distance:** {player_stats['driving_distance']:.1f} yards")
-                                            st.write(f"**Driving Accuracy:** {player_stats['driving_accuracy']:.1f}%")
+                                            st.write(f"**Location:** {course_info['location']}")
+                                            st.write(f"**Length:** {int(course_info['course_length'])} yards")
+                                            st.write(f"**Style Bias:** {course_info['style_bias']}")
+                                            st.write(f"**Green Speed:** {course_info['green_speed']:.1f} (stimpmeter)")
                                         
                                         with col2:
-                                            # Create a choropleth map showing win probabilities by course
-                                            st.subheader("Win Probabilities by Course Location")
-                                            
+                                            # Show a map with the course location
                                             if FOLIUM_AVAILABLE:
-                                                # Create base map centered on US (since most courses are there)
-                                                m = folium.Map(location=[39.8283, -98.5795], zoom_start=4)
-                                                
-                                                # Add markers for each course with colors based on win probability
-                                                for idx, row in predictions_df.iterrows():
-                                                    # Scale color from red (low probability) to green (high probability)
-                                                    # Find the normalized probability score (0-1)
-                                                    min_prob = predictions_df['win_probability'].min()
-                                                    max_prob = predictions_df['win_probability'].max()
-                                                    norm_prob = (row['win_probability'] - min_prob) / (max_prob - min_prob) if max_prob > min_prob else 0.5
-                                                    
-                                                    # Create color: red->yellow->green based on probability
-                                                    if norm_prob < 0.5:
-                                                        # Red to yellow gradient
-                                                        r = 255
-                                                        g = int(255 * (norm_prob * 2))
-                                                        b = 0
-                                                    else:
-                                                        # Yellow to green gradient
-                                                        r = int(255 * (1 - (norm_prob - 0.5) * 2))
-                                                        g = 255
-                                                        b = 0
-                                                    
-                                                    color = f'#{r:02x}{g:02x}{b:02x}'
-                                                    
-                                                    # Create the marker
-                                                    folium.CircleMarker(
-                                                        location=[row['lat'], row['lon']],
-                                                        radius=10 + (norm_prob * 15),  # Size based on probability
-                                                        popup=f"{row['course']}<br>Win Probability: {row['win_probability']:.2f}%",
-                                                        color=color,
-                                                        fill=True,
-                                                        fill_color=color,
-                                                        fill_opacity=0.7
-                                                    ).add_to(m)
-                                                
+                                                m = folium.Map(location=[course_info['lat'], course_info['lon']], zoom_start=12)
+                                                folium.Marker(
+                                                    [course_info['lat'], course_info['lon']], 
+                                                    popup=f"{selected_course}<br>{course_info['location']}",
+                                                    icon=folium.Icon(color='green', icon='flag')
+                                                ).add_to(m)
                                                 folium_static(m)
-                                                
-                                                # Add explanation about the model's decision and statistics used
-                                                st.markdown("""
-                                                ### Understanding the Win Probabilities
-                                                
-                                                **Why these probabilities?** 
-                                                The model calculates win probabilities based on how well the player's strengths match with each course's characteristics. 
-                                                Courses where the player's skills align well with the course demands show higher win probabilities (larger, greener circles).
-                                                
-                                                **Statistics used:**
-                                                - Player's strokes gained metrics compared to course requirements
-                                                - Historical performance patterns at similar course types
-                                                - Course-specific factors like length, green speed, and style bias
-                                                - Current player form and consistency
-                                                
-                                                The predictions take into account both the player's general skill level and specific strengths that may give 
-                                                them an advantage at particular courses.
-                                                """)
                                             else:
-                                                st.write("Map visualization unavailable. Install folium to see the choropleth map.")
-                                                # Create a simple table with location info as an alternative
-                                                location_df = predictions_df[['course', 'location', 'win_probability', 'lat', 'lon']].copy()
-                                                location_df.columns = ['Course', 'Location', 'Win Probability (%)', 'Latitude', 'Longitude']
-                                                st.dataframe(location_df)
+                                                st.info(f"Course coordinates: {course_info['lat']:.4f}, {course_info['lon']:.4f}")
+                                                st.write("Map visualization unavailable. Install folium to see course location.")
                                         
                                         # Display table with formatting
-                                        st.subheader("Win Probabilities by Course")
-                                        display_df = predictions_df[['course', 'location', 'win_probability']].copy()
-                                        display_df.columns = ['Course', 'Location', 'Win Probability (%)']
-                                        
+                                        st.subheader("Predicted Win Probabilities")
                                         st.dataframe(
-                                            display_df.style.format({'Win Probability (%)': '{:.2f}%'})
-                                                           .background_gradient(subset=['Win Probability (%)'], cmap='Greens'),
+                                            predictions_df.style.format({
+                                                'Win Probability (%)': '{:.2f}%',
+                                                'Course Fit Score': '{:.1f}%'
+                                            }).background_gradient(subset=['Win Probability (%)'], cmap='Blues')
+                                             .background_gradient(subset=['Course Fit Score'], cmap='Greens'),
                                             height=400
                                         )
                                         
-                                        # Visualization - Bar chart
-                                        st.subheader("Course Comparison")
-                                        
-                                        try:
-                                            # Create figure
-                                            fig, ax = plt.subplots(figsize=(12, 6))
-                                            
-                                            # Get top courses for the player
-                                            top_courses = predictions_df.head(10)[['course', 'win_probability']]
-                                            
-                                            # Plot horizontal bars
-                                            bars = ax.barh(
-                                                top_courses['course'], 
-                                                top_courses['win_probability'],
-                                                color='forestgreen'
-                                            )
-                                            
-                                            # Add labels
-                                            for bar in bars:
-                                                width = bar.get_width()
-                                                ax.text(
-                                                    width + 0.5, 
-                                                    bar.get_y() + bar.get_height()/2,
-                                                    f'{width:.2f}%',
-                                                    ha='left',
-                                                    va='center'
-                                                )
-                                            
-                                            # Set labels and title
-                                            ax.set_xlabel('Win Probability (%)')
-                                            ax.set_ylabel('Course')
-                                            ax.set_title(f'Top 10 Courses Where {selected_player} Has Highest Win Probability')
-                                            ax.grid(axis='x', linestyle='--', alpha=0.7)
-                                            
-                                            # Display plot
-                                            st.pyplot(fig)
-                                        except Exception as e:
-                                            st.error(f"Error creating visualization: {str(e)}")
+                                        # Show detailed analysis for top players
+                                        st.subheader("Player-Course Analysis")
+                                        for i, prediction in enumerate(predictions[:5]):  # Top 5 players
+                                            if selected_players and prediction['player'] not in selected_players:
+                                                continue
+                                                
+                                            with st.expander(f"📊 {prediction['player']} at {selected_course}"):
+                                                # Display course fit information
+                                                col1, col2 = st.columns([1, 1])
+                                                
+                                                with col1:
+                                                    st.markdown(f"**Win Probability: {prediction['win_probability']*100:.2f}%**")
+                                                    st.markdown(f"**Course Fit Score: {prediction['course_fit_score']*100:.1f}%**")
+                                                    
+                                                    # Display strengths
+                                                    if prediction.get('strengths') and isinstance(prediction.get('strengths'), list):
+                                                        st.markdown("**Player Strengths on this Course:**")
+                                                        for strength in prediction.get('strengths', []):
+                                                            if isinstance(strength, dict):
+                                                                skill = strength.get('skill', 'Unknown')
+                                                                rating = strength.get('rating', 0)
+                                                                importance = strength.get('importance', 0)
+                                                                st.markdown(f"- {skill}: {rating*100:.0f}% skill rating on a course that values it ({importance*100:.0f}% importance)")
+                                                            else:
+                                                                st.markdown(f"- {str(strength)}")
+                                                    else:
+                                                        st.markdown("**Player Strengths on this Course:** None identified")
+                                                    
+                                                    # Display weaknesses
+                                                    if prediction.get('weaknesses') and isinstance(prediction.get('weaknesses'), list):
+                                                        st.markdown("**Player Weaknesses on this Course:**")
+                                                        for weakness in prediction.get('weaknesses', []):
+                                                            if isinstance(weakness, dict):
+                                                                skill = weakness.get('skill', 'Unknown')
+                                                                rating = weakness.get('rating', 0)
+                                                                importance = weakness.get('importance', 0)
+                                                                st.markdown(f"- {skill}: {rating*100:.0f}% skill rating on a course that requires it ({importance*100:.0f}% importance)")
+                                                            else:
+                                                                st.markdown(f"- {str(weakness)}")
+                                                    else:
+                                                        st.markdown("**Player Weaknesses on this Course:** None identified")
+                                                
+                                                with col2:
+                                                    # Create a radar chart of player skills vs course demands
+                                                    skill_scores = prediction['skill_scores']
+                                                    categories = list(skill_scores.keys())
+                                                    player_values = [skill_scores[skill]['rating'] for skill in categories]
+                                                    course_values = [skill_scores[skill]['importance'] for skill in categories]
+                                                    
+                                                    # Use matplotlib for a radar chart
+                                                    import matplotlib.pyplot as plt
+                                                    
+                                                    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+                                                    
+                                                    # Plot the player skills and course demands
+                                                    angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+                                                    angles += angles[:1]  # Close the polygon
+                                                    
+                                                    player_values += player_values[:1]  # Close the polygon
+                                                    course_values += course_values[:1]  # Close the polygon
+                                                    
+                                                    ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
+                                                    ax.fill(angles, player_values, 'r', alpha=0.2)
+                                                    
+                                                    ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
+                                                    ax.fill(angles, course_values, 'b', alpha=0.2)
+                                                    
+                                                    ax.set_thetagrids(np.degrees(angles[:-1]), categories)
+                                                    ax.set_ylim(0, 1)
+                                                    ax.grid(True)
+                                                    ax.legend(loc='upper right')
+                                                    
+                                                    plt.title(f"{prediction['player']}'s Fit with {selected_course}")
+                                                    st.pyplot(fig)
                                     else:
                                         st.error("No predictions were generated. Please check the model.")
                                 except Exception as e:
