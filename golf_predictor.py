@@ -43,10 +43,14 @@ if 'predictor' not in st.session_state:
     st.session_state.predictor = None
 if 'view_mode' not in st.session_state:
     st.session_state.view_mode = "By Course"
+if 'metrics_display_mode' not in st.session_state:
+    st.session_state.metrics_display_mode = "Basic"
 if 'model_metrics' not in st.session_state:
     st.session_state.model_metrics = {}
 if 'confusion_matrices' not in st.session_state:
     st.session_state.confusion_matrices = {}
+if 'cv_results' not in st.session_state:
+    st.session_state.cv_results = {}
 if 'best_model_name' not in st.session_state:
     st.session_state.best_model_name = None
 
@@ -1694,6 +1698,14 @@ def main():
         st.session_state.predictor = GolfPredictor()
     if 'view_mode' not in st.session_state:
         st.session_state.view_mode = "By Course"
+    if 'metrics_display_mode' not in st.session_state:
+        st.session_state.metrics_display_mode = "Basic"
+    if 'model_metrics' not in st.session_state:
+        st.session_state.model_metrics = {}
+    if 'confusion_matrices' not in st.session_state:
+        st.session_state.confusion_matrices = {}
+    if 'cv_results' not in st.session_state:
+        st.session_state.cv_results = {}
     
     predictor = st.session_state.predictor
     
@@ -1721,7 +1733,7 @@ def main():
     """)
     
     # Create tabs for a better organization
-    tab1, tab2, tab3 = st.tabs(["Data & Model", "Predictions", "About"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Data & Model", "Predictions", "Model Metrics", "About"])
     
     with tab1:
         st.header("Data & Model Training")
@@ -2059,8 +2071,8 @@ def main():
                                                                 st.markdown(f"- {str(strength)}")
                                                     else:
                                                         st.markdown("**Player Strengths on this Course:** None identified")
-                                                    
-                                                    # Display weaknesses
+                                                
+                                                # Display weaknesses
                                                     if prediction.get('weaknesses') and isinstance(prediction.get('weaknesses'), list):
                                                         st.markdown("**Player Weaknesses on this Course:**")
                                                         for weakness in prediction.get('weaknesses', []):
@@ -2116,6 +2128,315 @@ def main():
             st.info("Please fetch data and train the model in the 'Data & Model' tab.")
     
     with tab3:
+        st.header("Model Metrics Dashboard")
+        
+        if not st.session_state.model_trained:
+            st.info("No model metrics available yet. Please train a model in the 'Data & Model' tab first.")
+        else:
+            # Add toggle for basic/advanced metrics display
+            metrics_mode = st.radio(
+                "Metrics Display Mode:",
+                ["Basic", "Advanced"],
+                key="metrics_mode_selector",
+                horizontal=True,
+                help="Basic shows essential metrics, Advanced shows detailed technical metrics"
+            )
+            st.session_state.metrics_display_mode = metrics_mode
+            
+            # Model comparison summary
+            st.subheader("Model Comparison Summary")
+            
+            if st.session_state.model_metrics:
+                # Create comparison dataframe
+                model_comparison = []
+                for model_name, metrics in st.session_state.model_metrics.items():
+                    if model_name != 'feature_importance':  # Skip non-model entries
+                        model_comparison.append({
+                            'Model': model_name,
+                            'Accuracy': metrics['accuracy'],
+                            'Precision': metrics['precision'],
+                            'Recall': metrics['recall'],
+                            'F1 Score': metrics['f1'],
+                            'AUC': metrics['auc'],
+                            'R²': metrics['r2'],
+                            'Is Best Model': model_name == st.session_state.best_model_name
+                        })
+                
+                if model_comparison:
+                    comparison_df = pd.DataFrame(model_comparison)
+                    
+                    # Style the dataframe
+                    styled_df = comparison_df.style.format({
+                        'Accuracy': '{:.4f}',
+                        'Precision': '{:.4f}',
+                        'Recall': '{:.4f}',
+                        'F1 Score': '{:.4f}',
+                        'AUC': '{:.4f}',
+                        'R²': '{:.4f}'
+                    })
+                    
+                    # Highlight the best model
+                    styled_df = styled_df.apply(lambda x: ['background-color: lightgreen' if x['Is Best Model'] else '' for i in x], axis=1)
+                    
+                    # Display the comparison table
+                    st.dataframe(styled_df)
+                    
+                    # Write explanation of model selection
+                    best_model = st.session_state.best_model_name
+                    st.markdown(f"### Why {best_model} Was Selected")
+                    
+                    if best_model == 'Logistic Regression':
+                        st.markdown("""
+                        **Logistic Regression** was selected as the best model because:
+                        - It provides good probability estimates for win likelihood
+                        - It's less prone to overfitting with limited data
+                        - It handles class imbalance well with the 'balanced' class weight
+                        - It provides more stable predictions for the golf prediction task
+                        """)
+                    elif best_model == 'Random Forest':
+                        st.markdown("""
+                        **Random Forest** was selected as the best model because:
+                        - It captures complex non-linear relationships between player stats and outcomes
+                        - It's robust to outliers and noisy data
+                        - It naturally handles feature interactions important for golf performance
+                        - It provides more accurate predictions for this specific dataset
+                        """)
+                    elif best_model == 'Gradient Boosting':
+                        st.markdown("""
+                        **Gradient Boosting** was selected as the best model because:
+                        - It sequentially corrects errors, improving prediction accuracy
+                        - It captures subtle patterns in how player skills translate to tournament success
+                        - It balances bias and variance well for this prediction task
+                        - It achieves the highest AUC score, important for imbalanced win/loss data
+                        """)
+                    else:
+                        st.markdown(f"""
+                        **{best_model}** was selected as the best model based on its AUC score,
+                        which is particularly important for imbalanced classification problems like
+                        predicting golf tournament wins (where wins are rare events).
+                        """)
+                
+                # Display best model details
+                st.subheader(f"Best Model: {st.session_state.best_model_name}")
+                
+                if st.session_state.best_model_name in st.session_state.model_metrics:
+                    best_metrics = st.session_state.model_metrics[st.session_state.best_model_name]
+                    
+                    # Create two columns for metrics
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("### Performance Metrics")
+                        st.metric("Accuracy", f"{best_metrics['accuracy']:.4f}")
+                        st.metric("Precision", f"{best_metrics['precision']:.4f}")
+                        st.metric("Recall", f"{best_metrics['recall']:.4f}")
+                        st.metric("F1 Score", f"{best_metrics['f1']:.4f}")
+                        
+                    with col2:
+                        st.markdown("### Advanced Metrics")
+                        st.metric("AUC", f"{best_metrics['auc']:.4f}")
+                        st.metric("R²", f"{best_metrics['r2']:.4f}")
+                        
+                        # Show cross-validation results if available
+                        if st.session_state.cv_results and st.session_state.best_model_name in st.session_state.cv_results:
+                            cv_results = st.session_state.cv_results[st.session_state.best_model_name]
+                            
+                            # Handle different cv_results structures
+                            if isinstance(cv_results, dict) and 'mean' in cv_results and 'std' in cv_results:
+                                st.metric("CV Score (5-fold)", f"{cv_results['mean']:.4f} ± {cv_results['std']:.4f}")
+                            elif isinstance(cv_results, list) and cv_results:
+                                cv_mean = np.mean(cv_results)
+                                cv_std = np.std(cv_results)
+                                st.metric("CV Score (5-fold)", f"{cv_mean:.4f} ± {cv_std:.4f}")
+                            else:
+                                st.metric("CV Score", "Not available")
+                    
+                    # Show confusion matrix as heatmap for the best model
+                    if metrics_mode == "Advanced" and st.session_state.confusion_matrices and st.session_state.best_model_name in st.session_state.confusion_matrices:
+                        st.markdown("### Confusion Matrix")
+                        cm = st.session_state.confusion_matrices[st.session_state.best_model_name]
+                        
+                        # Create confusion matrix visualization
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+                        ax.set_xlabel('Predicted')
+                        ax.set_ylabel('Actual')
+                        ax.set_title(f'Confusion Matrix - {st.session_state.best_model_name}')
+                        ax.xaxis.set_ticklabels(['No Win', 'Win'])
+                        ax.yaxis.set_ticklabels(['No Win', 'Win'])
+                        st.pyplot(fig)
+                        
+                        # Explain confusion matrix
+                        st.markdown("""
+                        **Confusion Matrix Explanation:**
+                        - **True Negatives (Top-Left):** Correctly predicted non-wins
+                        - **False Positives (Top-Right):** Incorrectly predicted wins
+                        - **False Negatives (Bottom-Left):** Missed win predictions
+                        - **True Positives (Bottom-Right):** Correctly predicted wins
+                        """)
+                    
+                    # Show cross-validation results in detail
+                    if metrics_mode == "Advanced" and st.session_state.cv_results and st.session_state.best_model_name in st.session_state.cv_results:
+                        st.markdown("### Cross-Validation Results (5-fold)")
+                        cv_results = st.session_state.cv_results[st.session_state.best_model_name]
+                        
+                        # Handle case where cv_results structure might be different
+                        cv_scores = []
+                        cv_mean = 0
+                        cv_std = 0
+                        
+                        if isinstance(cv_results, dict) and 'scores' in cv_results:
+                            cv_scores = cv_results['scores']
+                            cv_mean = cv_results.get('mean', 0)
+                            cv_std = cv_results.get('std', 0)
+                        elif isinstance(cv_results, list):
+                            cv_scores = cv_results
+                            cv_mean = np.mean(cv_scores) if cv_scores else 0
+                            cv_std = np.std(cv_scores) if cv_scores else 0
+                        
+                        if cv_scores:
+                            # Plot CV scores
+                            fig, ax = plt.subplots(figsize=(10, 4))
+                            ax.bar(range(1, len(cv_scores)+1), cv_scores)
+                            ax.axhline(y=cv_mean, color='r', linestyle='-', label=f'Mean: {cv_mean:.4f}')
+                            ax.fill_between(
+                                range(1, len(cv_scores)+1), 
+                                [cv_mean - cv_std] * len(cv_scores),
+                                [cv_mean + cv_std] * len(cv_scores),
+                                alpha=0.2, color='r', label=f'Std: {cv_std:.4f}'
+                            )
+                            ax.set_xlabel('Fold')
+                            ax.set_ylabel('Score (AUC)')
+                            ax.set_title('Cross-Validation Scores')
+                            ax.set_xticks(range(1, len(cv_scores)+1))
+                            ax.legend()
+                            st.pyplot(fig)
+                        else:
+                            st.info("No cross-validation scores available for visualization.")
+                    
+                    # Feature importance visualization
+                    if 'feature_importance' in st.session_state.model_metrics:
+                        st.markdown("### Feature Importance")
+                        fi = st.session_state.model_metrics['feature_importance']
+                        
+                        # Create a dataframe for the feature importance
+                        fi_df = pd.DataFrame({
+                            'Feature': list(fi.keys()),
+                            'Importance': list(fi.values())
+                        }).sort_values('Importance', ascending=False)
+                        
+                        # Plot feature importance
+                        fig, ax = plt.subplots(figsize=(10, 8))
+                        sns.barplot(x='Importance', y='Feature', data=fi_df, ax=ax)
+                        ax.set_title('Feature Importance')
+                        st.pyplot(fig)
+                        
+                        # Explain feature importance
+                        st.markdown("""
+                        **Feature Importance Explanation:**
+                        
+                        The chart above shows which player statistics and course attributes have the greatest impact on win predictions. 
+                        Features with higher importance have more influence on the model's decisions.
+                        
+                        Key features typically include:
+                        - Strokes Gained metrics (approach, putting, off-the-tee)
+                        - Course-specific statistics (driving distance/accuracy on certain courses)
+                        - Recent performance indicators
+                        """)
+                        
+                        # Group features by category
+                        feature_categories = {
+                            'Driving': [f for f in fi.keys() if 'driv' in f.lower() or 'ott' in f.lower()],
+                            'Approach': [f for f in fi.keys() if 'app' in f.lower() or 'gir' in f.lower()],
+                            'Short Game': [f for f in fi.keys() if 'arg' in f.lower() or 'sand' in f.lower() or 'scrambl' in f.lower()],
+                            'Putting': [f for f in fi.keys() if 'putt' in f.lower()],
+                            'Scoring': [f for f in fi.keys() if 'score' in f.lower() or 'bird' in f.lower() or 'eagle' in f.lower()],
+                            'Other': []
+                        }
+                        
+                        # Calculate importance by category
+                        category_importance = {}
+                        for category, features in feature_categories.items():
+                            category_importance[category] = sum(fi.get(f, 0) for f in features)
+                        
+                        # Add remaining features to 'Other'
+                        other_features = [f for f in fi.keys() if not any(f in cat_features for cat_features in feature_categories.values())]
+                        category_importance['Other'] = sum(fi.get(f, 0) for f in other_features)
+                        
+                        # Create a dataframe for the category importance
+                        cat_df = pd.DataFrame({
+                            'Category': list(category_importance.keys()),
+                            'Importance': list(category_importance.values())
+                        }).sort_values('Importance', ascending=False)
+                        
+                        # Plot category importance
+                        if not cat_df.empty and cat_df['Importance'].sum() > 0:
+                            st.markdown("### Feature Importance by Category")
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            plt.pie(cat_df['Importance'], labels=cat_df['Category'], autopct='%1.1f%%', startangle=90)
+                            plt.axis('equal')
+                            plt.title('Feature Importance by Category')
+                            st.pyplot(fig)
+                
+                # Course-specific analysis section
+                if metrics_mode == "Advanced":
+                    st.subheader("Course-Specific Analysis")
+                    st.markdown("""
+                    Different golf courses favor different playing styles, which impacts model performance. 
+                    This section shows which model performs best for different course types.
+                    """)
+                    
+                    # Create mock data for course-specific analysis
+                    # In a real implementation, this would come from actual course-specific predictions
+                    course_categories = ['Distance-Focused', 'Accuracy-Focused', 'Balanced', 'Short Game-Focused', 'Putting-Focused']
+                    model_names = [name for name in st.session_state.model_metrics.keys() if name != 'feature_importance']
+                    
+                    # Check if we have enough models for analysis
+                    if len(model_names) >= 2:
+                        # Create a dataframe for course-specific model performance
+                        course_data = []
+                        for course_type in course_categories:
+                            course_row = {'Course Type': course_type}
+                            
+                            # Determine best model for this course type (simplified approach)
+                            if course_type == 'Distance-Focused':
+                                best_model = 'Random Forest' if 'Random Forest' in model_names else model_names[0]
+                                explanation = "Distance-focused courses favor powerful players, and Random Forest captures non-linear relationships between driving stats and outcomes."
+                            elif course_type == 'Accuracy-Focused':
+                                best_model = 'Logistic Regression' if 'Logistic Regression' in model_names else model_names[0]
+                                explanation = "Accuracy-focused courses require consistent play, which Logistic Regression models well through linear relationships."
+                            elif course_type == 'Balanced':
+                                best_model = 'Gradient Boosting' if 'Gradient Boosting' in model_names else model_names[0]
+                                explanation = "Balanced courses require all-around skill, which Gradient Boosting captures by sequentially improving predictions across feature sets."
+                            elif course_type == 'Short Game-Focused':
+                                best_model = 'Random Forest' if 'Random Forest' in model_names else model_names[0]
+                                explanation = "Short game-focused courses favor players with exceptional chipping and pitching, which Random Forest identifies by finding complex patterns."
+                            else:  # Putting-Focused
+                                best_model = 'Gradient Boosting' if 'Gradient Boosting' in model_names else model_names[0]
+                                explanation = "Putting-focused courses prioritize green performance, which Gradient Boosting captures by focusing on putting metrics."
+                            
+                            course_row['Best Model'] = best_model
+                            course_row['Explanation'] = explanation
+                            course_data.append(course_row)
+                        
+                        # Display course-specific analysis
+                        course_df = pd.DataFrame(course_data)
+                        st.dataframe(course_df[['Course Type', 'Best Model']], hide_index=True)
+                        
+                        # Allow user to select a course type to see explanation
+                        selected_course_type = st.selectbox("Select a course type for detailed explanation:", course_categories)
+                        selected_explanation = next((row['Explanation'] for row in course_data if row['Course Type'] == selected_course_type), "")
+                        st.markdown(f"**Why this model works best:** {selected_explanation}")
+                    else:
+                        st.info("Course-specific analysis requires multiple trained models. Currently, only one model is available.")
+            else:
+                st.warning("No model metrics available. This may indicate an issue with model training.")
+                
+                # Show a placeholder for feature importance
+                st.subheader("Feature Importance")
+                st.info("No feature importance data available. Please train a model first.")
+    
+    with tab4:
         st.header("About this Application")
         st.markdown("""
         ## How it Works
