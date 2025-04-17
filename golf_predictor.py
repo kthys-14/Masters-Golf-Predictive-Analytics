@@ -1475,14 +1475,15 @@ class GolfPredictor:
                     # Create rich prediction data with geographical information
                     course_prediction = {
                         'course': course,
+                        'player': player_name,  # Add the player name to each prediction
                         'win_probability': win_prob,
                         'course_fit_score': course_fit_score,
-                        'strengths': fit_data.get('strengths', []),  # Use .get() to provide a default empty list
-                        'weaknesses': fit_data.get('weaknesses', []),  # Use .get() to provide a default empty list
+                        'strengths': fit_data.get('strengths', []),
+                        'weaknesses': fit_data.get('weaknesses', []),
                         'lat': course_row.get('lat', 0),
                         'lon': course_row.get('lon', 0),
                         'location': course_row.get('location', ''),
-                        'skill_scores': fit_data.get('skill_scores', {})  # Use .get() to provide a default empty dict
+                        'skill_scores': fit_data.get('skill_scores', {})
                     }
                     
                     predictions.append(course_prediction)
@@ -2010,48 +2011,20 @@ def main():
                                         # Create DataFrame from predictions
                                         predictions_df = pd.DataFrame([
                                             {
-                                                'Player': p['player'],
+                                                'Course': p['course'],
                                                 'Win Probability (%)': p['win_probability'] * 100,
                                                 'Course Fit Score': p.get('course_fit_score', 0) * 100,
+                                                'Location': p.get('location', 'Unknown'),
                                                 'Strengths': '; '.join([s.get('description', 'Unknown strength') for s in p.get('strengths', []) if isinstance(s, dict)]) if p.get('strengths') else 'None',
                                                 'Weaknesses': '; '.join([w.get('description', 'Unknown weakness') for w in p.get('weaknesses', []) if isinstance(w, dict)]) if p.get('weaknesses') else 'None'
                                             } 
                                             for p in predictions
                                         ])
                                         
-                                        # Filter by selected players if any
-                                        if selected_players:
-                                            predictions_df = predictions_df[predictions_df['Player'].isin(selected_players)]
-                                        
-                                        # Show course information
-                                        course_info = predictor.course_data[predictor.course_data['course_name'] == selected_course].iloc[0]
-                                        st.subheader(f"Course: {selected_course}")
-                                        
-                                        # Display course info and map side by side
-                                        col1, col2 = st.columns([1, 1])
-                                        
-                                        with col1:
-                                            st.write(f"**Location:** {course_info['location']}")
-                                            st.write(f"**Length:** {int(course_info['course_length'])} yards")
-                                            st.write(f"**Style Bias:** {course_info['style_bias']}")
-                                            st.write(f"**Green Speed:** {course_info['green_speed']:.1f} (stimpmeter)")
-                                        
-                                        with col2:
-                                            # Show a map with the course location
-                                            if FOLIUM_AVAILABLE:
-                                                m = folium.Map(location=[course_info['lat'], course_info['lon']], zoom_start=12)
-                                                folium.Marker(
-                                                    [course_info['lat'], course_info['lon']], 
-                                                    popup=f"{selected_course}<br>{course_info['location']}",
-                                                    icon=folium.Icon(color='green', icon='flag')
-                                                ).add_to(m)
-                                                folium_static(m)
-                                            else:
-                                                st.info(f"Course coordinates: {course_info['lat']:.4f}, {course_info['lon']:.4f}")
-                                                st.write("Map visualization unavailable. Install folium to see course location.")
+                                        # Remove filter by selected players since we're only looking at one player
                                         
                                         # Display table with formatting
-                                        st.subheader("Predicted Win Probabilities")
+                                        st.subheader(f"Predicted Win Probabilities for {selected_player}")
                                         st.dataframe(
                                             predictions_df.style.format({
                                                 'Win Probability (%)': '{:.2f}%',
@@ -2061,13 +2034,11 @@ def main():
                                             height=400
                                         )
                                         
-                                        # Show detailed analysis for top players
+                                        # Show detailed analysis for top courses
                                         st.subheader("Player-Course Analysis")
-                                        for i, prediction in enumerate(predictions[:5]):  # Top 5 players
-                                            if selected_players and prediction['player'] not in selected_players:
-                                                continue
-                                                
-                                            with st.expander(f"📊 {prediction['player']} at {selected_course}"):
+                                        for i, prediction in enumerate(predictions[:5]):  # Top 5 courses
+                                            course_name = prediction['course']
+                                            with st.expander(f"📊 {selected_player} at {course_name}"):
                                                 # Display course fit information
                                                 col1, col2 = st.columns([1, 1])
                                                 
@@ -2105,38 +2076,39 @@ def main():
                                                 
                                                 with col2:
                                                     # Create a radar chart of player skills vs course demands
-                                                    skill_scores = prediction['skill_scores']
-                                                    categories = list(skill_scores.keys())
-                                                    player_values = [skill_scores[skill]['rating'] for skill in categories]
-                                                    course_values = [skill_scores[skill]['importance'] for skill in categories]
-                                                    
-                                                    # Use matplotlib for a radar chart
-                                                    import matplotlib.pyplot as plt
-                                                    
-                                                    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
-                                                    
-                                                    # Plot the player skills and course demands
-                                                    angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
-                                                    angles += angles[:1]  # Close the polygon
-                                                    
-                                                    player_values += player_values[:1]  # Close the polygon
-                                                    course_values += course_values[:1]  # Close the polygon
-                                                    
-                                                    ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
-                                                    ax.fill(angles, player_values, 'r', alpha=0.2)
-                                                    
-                                                    ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
-                                                    ax.fill(angles, course_values, 'b', alpha=0.2)
-                                                    
-                                                    ax.set_thetagrids(np.degrees(angles[:-1]), categories)
-                                                    ax.set_ylim(0, 1)
-                                                    ax.grid(True)
-                                                    ax.legend(loc='upper right')
-                                                    
-                                                    plt.title(f"{prediction['player']}'s Fit with {selected_course}")
-                                                    st.pyplot(fig)
-                                    else:
-                                        st.error("No predictions were generated. Please check the model.")
+                                                    skill_scores = prediction.get('skill_scores', {})
+                                                    if skill_scores:
+                                                        categories = list(skill_scores.keys())
+                                                        player_values = [skill_scores[skill]['rating'] for skill in categories]
+                                                        course_values = [skill_scores[skill]['importance'] for skill in categories]
+                                                        
+                                                        # Use matplotlib for a radar chart
+                                                        import matplotlib.pyplot as plt
+                                                        
+                                                        fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+                                                        
+                                                        # Plot the player skills and course demands
+                                                        angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+                                                        angles += angles[:1]  # Close the polygon
+                                                        
+                                                        player_values += player_values[:1]  # Close the polygon
+                                                        course_values += course_values[:1]  # Close the polygon
+                                                        
+                                                        ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
+                                                        ax.fill(angles, player_values, 'r', alpha=0.2)
+                                                        
+                                                        ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
+                                                        ax.fill(angles, course_values, 'b', alpha=0.2)
+                                                        
+                                                        ax.set_thetagrids(np.degrees(angles[:-1]), categories)
+                                                        ax.set_ylim(0, 1)
+                                                        ax.grid(True)
+                                                        ax.legend(loc='upper right')
+                                                        
+                                                        plt.title(f"{selected_player}'s Fit with {course_name}")
+                                                        st.pyplot(fig)
+                                                    else:
+                                                        st.warning("Skill scores data not available for this course")
                                 except Exception as e:
                                     st.error(f"Error during prediction: {str(e)}")
                                     st.info("Try retraining the model or selecting a different player")
