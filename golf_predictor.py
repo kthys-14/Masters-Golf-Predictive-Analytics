@@ -1487,7 +1487,8 @@ class GolfPredictor:
                         'lat': course_row.get('lat', 0),
                         'lon': course_row.get('lon', 0),
                         'location': course_row.get('location', ''),
-                        'skill_scores': fit_data.get('skill_scores', {})
+                        'skill_scores': fit_data.get('skill_scores', {}),
+                        'player_profile': fit_data.get('player_profile', {})  # Ensure player_profile is included
                     }
                     
                     predictions.append(course_prediction)
@@ -1815,7 +1816,116 @@ def main():
                     courses = predictor.course_data['course_name'].tolist()
                     selected_course = st.selectbox("Select a golf course:", courses)
                     
+                    # NEW: Add dynamic course skill profile visualization
+                    if selected_course:
+                        course_info = predictor.course_data[predictor.course_data['course_name'] == selected_course].iloc[0]
+                        
+                        # Create columns for course info and skill profile
+                        course_col1, course_col2 = st.columns([1, 1])
+                        
+                        with course_col1:
+                            st.subheader(f"Course: {selected_course}")
+                            st.write(f"**Location:** {course_info['location']}")
+                            st.write(f"**Length:** {int(course_info['course_length'])} yards")
+                            st.write(f"**Style Bias:** {course_info['style_bias']}")
+                            st.write(f"**Green Speed:** {course_info['green_speed']:.1f} (stimpmeter)")
+                            
+                        with course_col2:
+                            st.subheader("Course Skill Requirements")
+                            
+                            # Generate course profile based on course characteristics
+                            course_profile = {
+                                'distance_importance': 0.5,  # Default values
+                                'accuracy_importance': 0.5,
+                                'approach_importance': 0.5,
+                                'short_game_importance': 0.5,
+                                'putting_importance': 0.5
+                            }
+                            
+                            # Set course profile based on style bias
+                            course_style = course_info.get('style_bias', "Balanced")
+                            
+                            if isinstance(course_style, str):  # Ensure course_style is a string
+                                if "Distance" in course_style:
+                                    course_profile['distance_importance'] = 0.9
+                                    course_profile['accuracy_importance'] = 0.3
+                                if "Precision" in course_style or "Accuracy" in course_style:
+                                    course_profile['accuracy_importance'] = 0.9
+                                    course_profile['approach_importance'] = 0.7
+                                if "Putting" in course_style:
+                                    course_profile['putting_importance'] = 0.9
+                                if "Short Game" in course_style:
+                                    course_profile['short_game_importance'] = 0.9
+                            
+                            # Adjust based on course length
+                            course_length = course_info.get('course_length', 7200)
+                            if course_length > 7400:  # Long course
+                                course_profile['distance_importance'] += 0.2
+                                course_profile['accuracy_importance'] -= 0.1
+                            elif course_length < 7100:  # Shorter course
+                                course_profile['distance_importance'] -= 0.2
+                                course_profile['accuracy_importance'] += 0.2
+                                course_profile['approach_importance'] += 0.2
+                            
+                            # Normalize all importance values between 0 and 1
+                            for key in course_profile:
+                                course_profile[key] = max(0.0, min(1.0, course_profile[key]))
+                            
+                            # Create a radar chart of course skill requirements
+                            categories = ['Distance', 'Accuracy', 'Approach', 'Short Game', 'Putting']
+                            values = [
+                                course_profile['distance_importance'],
+                                course_profile['accuracy_importance'],
+                                course_profile['approach_importance'],
+                                course_profile['short_game_importance'],
+                                course_profile['putting_importance']
+                            ]
+                            
+                            # Ensure matplotlib is available in this scope
+                            try:
+                                import matplotlib.pyplot as plt
+                                
+                                # Create radar chart
+                                fig = plt.figure(figsize=(6, 6))
+                                ax = fig.add_subplot(111, polar=True)
+                                
+                                # Plot the course demands
+                                angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+                                values += values[:1]  # Close the polygon
+                                angles += angles[:1]  # Close the polygon
+                                
+                                ax.plot(angles, values, 'b-', linewidth=2, label='Skill Importance')
+                                ax.fill(angles, values, 'b', alpha=0.2)
+                                
+                                ax.set_thetagrids(np.degrees(angles[:-1]), categories)
+                                ax.set_ylim(0, 1)
+                                ax.grid(True)
+                                
+                                plt.title(f"{selected_course} Skill Requirements")
+                                st.pyplot(fig)
+                            except Exception as e:
+                                st.error(f"Error creating chart: {str(e)}")
+                                st.info("Unable to create the radar chart. This may be due to missing matplotlib or other dependencies.")
+                            
+                            # Add skill importance descriptions
+                            skill_descriptions = []
+                            for i, skill in enumerate(categories):
+                                importance = values[i]
+                                if importance >= 0.8:
+                                    level = "Very High"
+                                elif importance >= 0.6:
+                                    level = "High"
+                                elif importance >= 0.4:
+                                    level = "Medium"
+                                else:
+                                    level = "Low"
+                                
+                                skill_descriptions.append(f"**{skill}**: {level} importance ({importance:.2f})")
+                            
+                            st.markdown("\n".join(skill_descriptions))
+                    
                     # Player selection with search
+                    st.subheader("Player Selection")
                     if predictor.player_data is not None:
                         players = sorted(predictor.player_data['player_name'].unique().tolist())
                         
@@ -1976,19 +2086,98 @@ def main():
                                                             player_values += player_values[:1]  # Close the polygon
                                                             course_values += course_values[:1]  # Close the polygon
                                                             
+                                                            # Enhanced visualization with better colors and labels
                                                             ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
                                                             ax.fill(angles, player_values, 'r', alpha=0.2)
                                                             
                                                             ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
                                                             ax.fill(angles, course_values, 'b', alpha=0.2)
                                                             
+                                                            # Calculate match/mismatch areas
+                                                            # Where player skills exceed course demands (good match)
+                                                            match_values = []
+                                                            for p, c in zip(player_values, course_values):
+                                                                match_values.append(min(p, c))
+                                                            
+                                                            # Highlight the matching areas with green
+                                                            ax.fill(angles, match_values, 'g', alpha=0.3, label='Good Match')
+                                                            
+                                                            # Set axis properties for better visibility
                                                             ax.set_thetagrids(np.degrees(angles[:-1]), categories)
                                                             ax.set_ylim(0, 1)
-                                                            ax.grid(True)
-                                                            ax.legend(loc='upper right')
+                                                            ax.set_yticklabels([])  # Hide radial ticks
+                                                            ax.grid(True, alpha=0.3)
+                                                            ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
                                                             
-                                                            plt.title(f"{prediction['player']}'s Fit with {selected_course}")
+                                                            plt.title(f"{prediction['player']}'s Fit with {selected_course}", y=1.08)
                                                             st.pyplot(fig)
+                                                            
+                                                            # NEW: Add detailed alignment score breakdown
+                                                            st.markdown("#### Skill Alignment Breakdown")
+                                                            
+                                                            # Calculate alignment score for each skill (how well player skills match course demands)
+                                                            alignment_scores = []
+                                                            for i, skill in enumerate(categories):
+                                                                player_skill = player_values[i] if i < len(player_values) else 0
+                                                                course_demand = course_values[i] if i < len(course_values) else 0
+                                                                
+                                                                # Only penalize for skills that matter to the course
+                                                                if course_demand > 0.4:  # Course values this skill
+                                                                    # Calculate alignment as how well player meets or exceeds course demands
+                                                                    # Scale to 0-100 for display
+                                                                    if player_skill >= course_demand:
+                                                                        alignment = 100  # Perfect or better match
+                                                                    else:
+                                                                        # How close player is to meeting requirement (percentage)
+                                                                        alignment = (player_skill / course_demand) * 100
+                                                                else:
+                                                                    alignment = 75  # Neutral for skills that don't matter much
+                                                                    
+                                                                alignment_scores.append({
+                                                                    'Skill': skill,
+                                                                    'Player Rating': player_skill,
+                                                                    'Course Requirement': course_demand,
+                                                                    'Alignment': alignment
+                                                                })
+                                                            
+                                                            # Create alignment dataframe 
+                                                            alignment_df = pd.DataFrame(alignment_scores)
+                                                            
+                                                            # Format the dataframe for display with color coding
+                                                            def color_alignment(val):
+                                                                """Color code the alignment score"""
+                                                                if val >= 90:
+                                                                    return 'background-color: #8eff8e'  # Green
+                                                                elif val >= 70:
+                                                                    return 'background-color: #c9f5c9'  # Light green
+                                                                elif val >= 50:
+                                                                    return 'background-color: #ffefc1'  # Light yellow
+                                                                else:
+                                                                    return 'background-color: #ffcccb'  # Light red
+                                                            
+                                                            # Apply styling
+                                                            styled_alignment = alignment_df.style.format({
+                                                                'Player Rating': '{:.2f}',
+                                                                'Course Requirement': '{:.2f}',
+                                                                'Alignment': '{:.0f}%'
+                                                            }).applymap(color_alignment, subset=['Alignment'])
+                                                            
+                                                            # Display the alignment table
+                                                            st.dataframe(styled_alignment)
+                                                            
+                                                            # NEW: Overall match assessment
+                                                            avg_alignment = alignment_df['Alignment'].mean()
+                                                            st.markdown(f"**Overall Match Score: {avg_alignment:.0f}%**")
+                                                            
+                                                            if avg_alignment >= 90:
+                                                                st.success("Perfect Match: This player's skills perfectly align with the course requirements!")
+                                                            elif avg_alignment >= 75:
+                                                                st.success("Strong Match: This player's skills align well with most of this course's key requirements.")
+                                                            elif avg_alignment >= 60:
+                                                                st.warning("Moderate Match: This player has some skill gaps for this course's requirements.")
+                                                            else:
+                                                                st.error("Poor Match: This player's skills don't align well with what this course demands.")
+                                                                
                                                         else:
                                                             st.warning("Insufficient data to create skill radar chart")
                                                     else:
@@ -2027,13 +2216,13 @@ def main():
                                                 'Win Probability (%)': p['win_probability'] * 100,
                                                 'Course Fit Score': p.get('course_fit_score', 0) * 100,
                                                 'Location': p.get('location', 'Unknown'),
+                                                'Lat': p.get('lat', 0),
+                                                'Lon': p.get('lon', 0),
                                                 'Strengths': '; '.join([s.get('description', 'Unknown strength') for s in p.get('strengths', []) if isinstance(s, dict)]) if p.get('strengths') else 'None',
                                                 'Weaknesses': '; '.join([w.get('description', 'Unknown weakness') for w in p.get('weaknesses', []) if isinstance(w, dict)]) if p.get('weaknesses') else 'None'
                                             } 
                                             for p in predictions
                                         ])
-                                        
-                                        # Remove filter by selected players since we're only looking at one player
                                         
                                         # Display table with formatting
                                         st.subheader(f"Predicted Win Probabilities for {selected_player}")
@@ -2045,6 +2234,175 @@ def main():
                                              .background_gradient(subset=['Course Fit Score'], cmap='Greens'),
                                             height=400
                                         )
+                                        
+                                        # NEW: Add a chloropleth map visualization showing all courses colored by fit score
+                                        st.subheader(f"Course Fit Map for {selected_player}")
+                                        
+                                        # Check if we have course locations
+                                        if FOLIUM_AVAILABLE and not predictions_df[['Lat', 'Lon']].isna().all().all():
+                                            st.markdown("This map shows how well the player's skills align with different courses. Darker colors indicate better fit.")
+                                            
+                                            # Create the map centered on USA
+                                            m = folium.Map(location=[39.8283, -98.5795], zoom_start=4)
+                                            
+                                            # Add course markers, colored by course fit score
+                                            for idx, row in predictions_df.iterrows():
+                                                if pd.notna(row['Lat']) and pd.notna(row['Lon']):
+                                                    # Normalize fit score to determine color intensity (0-1)
+                                                    fit_score = row['Course Fit Score'] / 100.0
+                                                    
+                                                    # Calculate color based on fit score (green gradient)
+                                                    # Use more dramatic color scale with darker greens for better fits
+                                                    r = int(255 * (1 - fit_score))
+                                                    g = int(200 + 55 * fit_score)
+                                                    b = int(150 * (1 - fit_score))
+                                                    color = f'#{r:02x}{g:02x}{b:02x}'
+                                                    
+                                                    # Circle size based on win probability
+                                                    radius = 5 + (row['Win Probability (%)'] / 2)
+                                                    
+                                                    # Create a circle marker with popup info
+                                                    folium.CircleMarker(
+                                                        location=[row['Lat'], row['Lon']],
+                                                        radius=radius,
+                                                        color=color,
+                                                        fill=True,
+                                                        fill_color=color,
+                                                        fill_opacity=0.7,
+                                                        popup=f"""
+                                                        <b>{row['Course']}</b><br>
+                                                        Location: {row['Location']}<br>
+                                                        Win Probability: {row['Win Probability (%)']:.2f}%<br>
+                                                        Course Fit: {row['Course Fit Score']:.1f}%<br>
+                                                        Strengths: {row['Strengths']}<br>
+                                                        Weaknesses: {row['Weaknesses']}
+                                                        """
+                                                    ).add_to(m)
+                                            
+                                            # Display the map
+                                            folium_static(m)
+                                            
+                                            # Add a legend explaining the colors
+                                            st.markdown("""
+                                            **Map Legend:**
+                                            - **Circle Size**: Larger circles indicate higher win probability
+                                            - **Circle Color**: Darker green indicates better course fit for the player
+                                            - **Click on Circles**: For detailed player-course fit information
+                                            """)
+                                        else:
+                                            st.warning("Map visualization requires folium package and course location data.")
+                                        
+                                        # NEW: Add a section to visualize skill alignment across all courses
+                                        st.subheader(f"Skill Alignment Profile for {selected_player}")
+                                        
+                                        # Create tabs for different visualization options
+                                        skill_viz_tabs = st.tabs(["Skill Alignment Summary", "Detailed Skill Breakdown"])
+                                        
+                                        with skill_viz_tabs[0]:
+                                            # Extract player skill profile from the first prediction
+                                            try:
+                                                if predictions and len(predictions) > 0:
+                                                    # Check if player_profile exists
+                                                    if 'player_profile' in predictions[0]:
+                                                        player_profile = predictions[0]['player_profile']
+                                                        
+                                                        # Create a bar chart of player skills
+                                                        skill_names = ['Distance', 'Accuracy', 'Approach', 'Short Game', 'Putting']
+                                                        skill_values = [
+                                                            player_profile.get('distance_rating', 0),
+                                                            player_profile.get('accuracy_rating', 0),
+                                                            player_profile.get('approach_rating', 0),
+                                                            player_profile.get('short_game_rating', 0),
+                                                            player_profile.get('putting_rating', 0)
+                                                        ]
+                                                        
+                                                        # Ensure matplotlib is available in this scope
+                                                        import matplotlib.pyplot as plt
+                                                        
+                                                        # Create player skill profile chart
+                                                        fig, ax = plt.subplots(figsize=(10, 6))
+                                                        bars = ax.bar(skill_names, skill_values, color='royalblue')
+                                                        
+                                                        # Add value labels on top of bars
+                                                        for bar in bars:
+                                                            height = bar.get_height()
+                                                            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                                                                    f'{height:.2f}', ha='center', va='bottom')
+                                                        
+                                                        ax.set_ylim(0, 1.1)
+                                                        ax.set_ylabel('Skill Rating (0-1)')
+                                                        ax.set_title(f'{selected_player}\'s Skill Profile')
+                                                        ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.3)
+                                                        st.pyplot(fig)
+                                                        
+                                                        # Add explanation
+                                                        st.markdown("""
+                                                        This chart shows the player's skill profile across five key areas.
+                                                        Higher values (>0.5) indicate strengths, while lower values (<0.5) indicate potential weaknesses.
+                                                        """)
+                                                    else:
+                                                        st.warning("Player profile data is not available in the predictions object.")
+                                                        st.info("Available keys in prediction: " + ", ".join(predictions[0].keys()))
+                                                else:
+                                                    st.warning("No predictions available to extract player profile from.")
+                                            except Exception as e:
+                                                st.error(f"Error displaying player profile: {str(e)}")
+                                                st.info("Please try retraining the model or selecting a different player.")
+                                        with skill_viz_tabs[1]:
+                                            # Course-by-course skill alignment
+                                            if predictions and len(predictions) > 0:
+                                                # Let user select which courses to compare
+                                                top_courses = [p['course'] for p in predictions[:10]]
+                                                selected_courses = st.multiselect(
+                                                    "Select courses to compare skill alignment:",
+                                                    options=top_courses,
+                                                    default=top_courses[:3] if len(top_courses) >= 3 else top_courses
+                                                )
+                                                
+                                                if selected_courses:
+                                                    # Create a heatmap of skill alignment across selected courses
+                                                    skill_data = []
+                                                    
+                                                    # Get skills data for each selected course
+                                                    for course_name in selected_courses:
+                                                        course_prediction = next((p for p in predictions if p['course'] == course_name), None)
+                                                        if course_prediction and 'skill_scores' in course_prediction:
+                                                            skill_scores = course_prediction['skill_scores']
+                                                            course_data = {'Course': course_name}
+                                                            
+                                                            # Calculate alignment score for each skill
+                                                            for skill, data in skill_scores.items():
+                                                                alignment = data['weighted_score'] / data['importance'] if data['importance'] > 0 else 0
+                                                                course_data[f"{skill}"] = alignment
+                                                            
+                                                            skill_data.append(course_data)
+                                                    
+                                                    if skill_data:
+                                                        # Create DataFrame for visualization
+                                                        skill_df = pd.DataFrame(skill_data)
+                                                        skill_df = skill_df.set_index('Course')
+                                                        
+                                                        # Ensure matplotlib is available in this scope
+                                                        import matplotlib.pyplot as plt
+                                                        
+                                                        # Create heatmap
+                                                        fig, ax = plt.subplots(figsize=(12, len(selected_courses) * 0.8 + 2))
+                                                        sns.heatmap(skill_df, annot=True, cmap='YlGn', vmin=0, vmax=1, ax=ax)
+                                                        plt.title(f'Skill Alignment for {selected_player} Across Courses')
+                                                        st.pyplot(fig)
+                                                        
+                                                        # Add explanation
+                                                        st.markdown("""
+                                                        **Skill Alignment Heatmap:**
+                                                        - Values closer to 1 (green) indicate better alignment between player skills and course demands
+                                                        - Values closer to 0 (yellow) indicate misalignment or areas where the player's skills don't match course requirements
+                                                        """)
+                                                    else:
+                                                        st.warning("Skill alignment data not available for the selected courses.")
+                                                else:
+                                                    st.info("Please select at least one course to visualize skill alignment.")
+                                            else:
+                                                st.warning("Prediction data is not available for skill alignment visualization.")
                                         
                                         # Show detailed analysis for top courses
                                         st.subheader("Player-Course Analysis")
@@ -2090,35 +2448,40 @@ def main():
                                                     # Create a radar chart of player skills vs course demands
                                                     skill_scores = prediction.get('skill_scores', {})
                                                     if skill_scores:
-                                                        categories = list(skill_scores.keys())
-                                                        player_values = [skill_scores[skill]['rating'] for skill in categories]
-                                                        course_values = [skill_scores[skill]['importance'] for skill in categories]
-                                                        
-                                                        # Use matplotlib for a radar chart
-                                                        import matplotlib.pyplot as plt
-                                                        
-                                                        fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
-                                                        
-                                                        # Plot the player skills and course demands
-                                                        angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
-                                                        angles += angles[:1]  # Close the polygon
-                                                        
-                                                        player_values += player_values[:1]  # Close the polygon
-                                                        course_values += course_values[:1]  # Close the polygon
-                                                        
-                                                        ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
-                                                        ax.fill(angles, player_values, 'r', alpha=0.2)
-                                                        
-                                                        ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
-                                                        ax.fill(angles, course_values, 'b', alpha=0.2)
-                                                        
-                                                        ax.set_thetagrids(np.degrees(angles[:-1]), categories)
-                                                        ax.set_ylim(0, 1)
-                                                        ax.grid(True)
-                                                        ax.legend(loc='upper right')
-                                                        
-                                                        plt.title(f"{selected_player}'s Fit with {course_name}")
-                                                        st.pyplot(fig)
+                                                        try:
+                                                            categories = list(skill_scores.keys())
+                                                            player_values = [skill_scores[skill]['rating'] for skill in categories]
+                                                            course_values = [skill_scores[skill]['importance'] for skill in categories]
+                                                            
+                                                            # Ensure matplotlib is available in this scope 
+                                                            import matplotlib.pyplot as plt
+                                                            
+                                                            # Create the radar chart
+                                                            fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+                                                            
+                                                            # Plot the player skills and course demands
+                                                            angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+                                                            angles += angles[:1]  # Close the polygon
+                                                            
+                                                            player_values += player_values[:1]  # Close the polygon
+                                                            course_values += course_values[:1]  # Close the polygon
+                                                            
+                                                            ax.plot(angles, player_values, 'r-', linewidth=2, label='Player Skills')
+                                                            ax.fill(angles, player_values, 'r', alpha=0.2)
+                                                            
+                                                            ax.plot(angles, course_values, 'b-', linewidth=2, label='Course Demands')
+                                                            ax.fill(angles, course_values, 'b', alpha=0.2)
+                                                            
+                                                            ax.set_thetagrids(np.degrees(angles[:-1]), categories)
+                                                            ax.set_ylim(0, 1)
+                                                            ax.grid(True)
+                                                            ax.legend(loc='upper right')
+                                                            
+                                                            plt.title(f"{selected_player}'s Fit with {course_name}")
+                                                            st.pyplot(fig)
+                                                        except Exception as e:
+                                                            st.error(f"Error creating chart: {str(e)}")
+                                                            st.info("We're still processing this player's full profile")
                                                     else:
                                                         st.warning("Skill scores data not available for this course")
                                 except Exception as e:
@@ -2250,69 +2613,7 @@ def main():
                                 st.metric("CV Score (5-fold)", f"{cv_mean:.4f} ± {cv_std:.4f}")
                             else:
                                 st.metric("CV Score", "Not available")
-                    
-                    # Show confusion matrix as heatmap for the best model
-                    if metrics_mode == "Advanced" and st.session_state.confusion_matrices and st.session_state.best_model_name in st.session_state.confusion_matrices:
-                        st.markdown("### Confusion Matrix")
-                        cm = st.session_state.confusion_matrices[st.session_state.best_model_name]
-                        
-                        # Create confusion matrix visualization
-                        fig, ax = plt.subplots(figsize=(8, 6))
-                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-                        ax.set_xlabel('Predicted')
-                        ax.set_ylabel('Actual')
-                        ax.set_title(f'Confusion Matrix - {st.session_state.best_model_name}')
-                        ax.xaxis.set_ticklabels(['No Win', 'Win'])
-                        ax.yaxis.set_ticklabels(['No Win', 'Win'])
-                        st.pyplot(fig)
-                        
-                        # Explain confusion matrix
-                        st.markdown("""
-                        **Confusion Matrix Explanation:**
-                        - **True Negatives (Top-Left):** Correctly predicted non-wins
-                        - **False Positives (Top-Right):** Incorrectly predicted wins
-                        - **False Negatives (Bottom-Left):** Missed win predictions
-                        - **True Positives (Bottom-Right):** Correctly predicted wins
-                        """)
-                    
-                    # Show cross-validation results in detail
-                    if metrics_mode == "Advanced" and st.session_state.cv_results and st.session_state.best_model_name in st.session_state.cv_results:
-                        st.markdown("### Cross-Validation Results (5-fold)")
-                        cv_results = st.session_state.cv_results[st.session_state.best_model_name]
-                        
-                        # Handle case where cv_results structure might be different
-                        cv_scores = []
-                        cv_mean = 0
-                        cv_std = 0
-                        
-                        if isinstance(cv_results, dict) and 'scores' in cv_results:
-                            cv_scores = cv_results['scores']
-                            cv_mean = cv_results.get('mean', 0)
-                            cv_std = cv_results.get('std', 0)
-                        elif isinstance(cv_results, list):
-                            cv_scores = cv_results
-                            cv_mean = np.mean(cv_scores) if cv_scores else 0
-                            cv_std = np.std(cv_scores) if cv_scores else 0
-                        
-                        if cv_scores:
-                            # Plot CV scores
-                            fig, ax = plt.subplots(figsize=(10, 4))
-                            ax.bar(range(1, len(cv_scores)+1), cv_scores)
-                            ax.axhline(y=cv_mean, color='r', linestyle='-', label=f'Mean: {cv_mean:.4f}')
-                            ax.fill_between(
-                                range(1, len(cv_scores)+1), 
-                                [cv_mean - cv_std] * len(cv_scores),
-                                [cv_mean + cv_std] * len(cv_scores),
-                                alpha=0.2, color='r', label=f'Std: {cv_std:.4f}'
-                            )
-                            ax.set_xlabel('Fold')
-                            ax.set_ylabel('Score (AUC)')
-                            ax.set_title('Cross-Validation Scores')
-                            ax.set_xticks(range(1, len(cv_scores)+1))
-                            ax.legend()
-                            st.pyplot(fig)
-                        else:
-                            st.info("No cross-validation scores available for visualization.")
+                                        
                     
                     # Feature importance visualization
                     if 'feature_importance' in st.session_state.model_metrics:
@@ -2325,11 +2626,18 @@ def main():
                             'Importance': list(fi.values())
                         }).sort_values('Importance', ascending=False)
                         
-                        # Plot feature importance
-                        fig, ax = plt.subplots(figsize=(10, 8))
-                        sns.barplot(x='Importance', y='Feature', data=fi_df, ax=ax)
-                        ax.set_title('Feature Importance')
-                        st.pyplot(fig)
+                        # Ensure matplotlib is available in this scope
+                        try:
+                            import matplotlib.pyplot as plt
+                            
+                            # Plot feature importance
+                            fig, ax = plt.subplots(figsize=(10, 8))
+                            sns.barplot(x='Importance', y='Feature', data=fi_df, ax=ax)
+                            ax.set_title('Feature Importance')
+                            st.pyplot(fig)
+                        except Exception as e:
+                            st.error(f"Error creating feature importance chart: {str(e)}")
+                            st.info("Unable to create the chart. This may be due to missing matplotlib or other dependencies.")
                         
                         # Explain feature importance
                         st.markdown("""
@@ -2372,11 +2680,19 @@ def main():
                         # Plot category importance
                         if not cat_df.empty and cat_df['Importance'].sum() > 0:
                             st.markdown("### Feature Importance by Category")
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            plt.pie(cat_df['Importance'], labels=cat_df['Category'], autopct='%1.1f%%', startangle=90)
-                            plt.axis('equal')
-                            plt.title('Feature Importance by Category')
-                            st.pyplot(fig)
+                            
+                            # Ensure matplotlib is available in this scope
+                            try:
+                                import matplotlib.pyplot as plt
+                                
+                                fig, ax = plt.subplots(figsize=(10, 6))
+                                plt.pie(cat_df['Importance'], labels=cat_df['Category'], autopct='%1.1f%%', startangle=90)
+                                plt.axis('equal')
+                                plt.title('Feature Importance by Category')
+                                st.pyplot(fig)
+                            except Exception as e:
+                                st.error(f"Error creating category importance chart: {str(e)}")
+                                st.info("Unable to create the pie chart. This may be due to missing matplotlib or other dependencies.")
                 
                 # Course-specific analysis section
                 if metrics_mode == "Advanced":
