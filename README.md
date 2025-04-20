@@ -25,10 +25,10 @@ This application uses historical player performance data and course characterist
 
 1. In the application:
    - Click "Fetch Data from DataGolf API" to load the data
-   - Click "Train Prediction Model" to build the machine learning model
+   - Click "Train Prediction Model" to build the machine learning model. FYI, this takes a while to run expect ~10 minutes.
    - Select a golf course to predict tournament winners
    - Optionally, search for specific players
-
+ 
 ## Data Source
 
 This application uses data from the [DataGolf API](https://datagolf.com/), which provides comprehensive statistics for professional golf. The application can also generate synthetic data for demonstration purposes.
