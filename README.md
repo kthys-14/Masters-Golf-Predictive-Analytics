@@ -2,7 +2,7 @@
 
 A machine learning application that predicts the most likely winners of PGA Tour tournaments based on player statistics and course characteristics.
 
-## Overview
+## Description
 
 This application uses historical player performance data and course characteristics to predict which players are most likely to win at specific golf tournaments. The model analyzes several key performance metrics including:
 
@@ -18,17 +18,12 @@ This application uses historical player performance data and course characterist
 2. Clone this repository
 3. Run the setup script to install dependencies and create the necessary directories:
    ```
-   python setup.py
+   python run_with_dependencies.py
    ```
 
-## Usage
+## Execution
 
-1. Launch the Streamlit application:
-   ```
-   streamlit run golf_predictor.py
-   ```
-
-2. In the application:
+1. In the application:
    - Click "Fetch Data from DataGolf API" to load the data
    - Click "Train Prediction Model" to build the machine learning model
    - Select a golf course to predict tournament winners
